@@ -11,7 +11,7 @@ for an ordinary OpenClaw Enterprise development stack. That profile starts the
 real control plane, Gateway, and operator Workspaces. It prepares the supported
 fail-closed Agent path but does not create an Agent.
 
-Create the private Kubernetes-only OpenShell `v0.1.3-pre.1` environment from the
+Create the private Kubernetes-only OpenShell `v0.1.3-pre.2` environment from the
 repository root:
 
 ```sh
@@ -25,7 +25,7 @@ export OCC_DEVELOPMENT_SANDBOX_DRIVER=openshell
 The launcher uses Docker or Podman only to host k3d and build or import images.
 PostgreSQL, the OCE API and worker, and OpenShell Gateway run inside the cluster.
 It leaves the environment running and does not change the default kubeconfig or
-context. No model credential is needed because stock v0.1.3-pre.1 cannot run the
+context. No model credential is needed because stock v0.1.3-pre.2 cannot run the
 regular Agent path.
 
 Stop the reusable environment before proving the setup and cleanup lifecycle in
@@ -119,7 +119,7 @@ production API from an OCC Secret holding `OPENAI_API_KEY`, check its live
 principal receives `operate` on the source only, not on the Secret.
 
 Set `OCC_TEST_OPENSHELL_SECRET_PROJECTION=0` for the stock fail-closed proof. It
-passes the production requirements to v0.1.3-pre.1 unchanged and expects the Driver to
+passes the production requirements to v0.1.3-pre.2 unchanged and expects the Driver to
 reject the `APP_SERVER_TOKEN` Secret projection before the candidate can
 activate. The model key no longer appears among the rejected entries. This does
 not prove provider authentication or model execution.
@@ -203,7 +203,7 @@ helper-owned Harness environments; pass `--harness codex` or
 
 The integration uses an operator-owned Helm wrapper to install the OpenShell
 gateway before delegating to the Driver. The bundled Driver does not install
-that gateway. Stock OpenShell `v0.1.3-pre.1` cannot receive the required app-server
+that gateway. Stock OpenShell `v0.1.3-pre.2` cannot receive the required app-server
 token `secretKeyRef`, plugin-runtime ConfigMap, or projected workload identity
 through its gateway configuration.
 
@@ -235,7 +235,7 @@ to the same root so authorization remains exact. Helm permits
 the OpenShell supervisor Pod to reach Envoy only from the Gateway-attached
 tenant namespace because the supervisor owns the policy-enforced outbound
 socket. The verification-only Gateway enables caller driver configuration and
-disables v0.1.3-pre.1 resource admission because this bridge attaches OCE-owned PVCs
+disables v0.1.3-pre.2 resource admission because this bridge attaches OCE-owned PVCs
 without OpenShell approval labels. The Enterprise Driver still restricts the
 request to its approved Harness mounts. This setting is not a supported
 production path. The Driver omits the service authorization mode, so OpenShell also removes the
@@ -302,7 +302,7 @@ scoped environment file for this suite.
 | Variable                                  | Requirement or default                                                                                                                                 |
 | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `OCC_TEST_OPENSHELL_K3D_REAL`             | Set to `1` to explicitly opt into the real OpenShell integration.                                                                                      |
-| `OCC_TEST_OPENSHELL_SECRET_PROJECTION`    | `0` selects stock fail-closed proof; `1` selects the verification-only v0.1.3-pre.1 compatibility proof with exposed-route and real model-turn checks. |
+| `OCC_TEST_OPENSHELL_SECRET_PROJECTION`    | `0` selects stock fail-closed proof; `1` selects the verification-only v0.1.3-pre.2 compatibility proof with exposed-route and real model-turn checks. |
 | `OPENAI_API_KEY`                          | Existing authorized provider credential, registered as a credential source for the required real model turn.                                           |
 | `OCC_TEST_OPENSHELL_HARNESS`              | `codex` (default) selects the app-server proof; `openclaw` selects the dedicated native worker without an inbound Harness exposure.                    |
 | `OCC_TEST_OPENAI_MODEL`                   | Authorized provider model; defaults to `gpt-6-astra`.                                                                                                  |
@@ -317,7 +317,7 @@ scoped environment file for this suite.
 | `OCC_TEST_OPENSHELL_GATEWAY_IMAGE`        | Imported immutable OpenShell gateway image pinned by SHA-256 digest.                                                                                   |
 | `OCC_TEST_OPENSHELL_SANDBOX_IMAGE`        | Imported immutable OpenShell sandbox runtime image pinned by SHA-256 digest.                                                                           |
 | `OCC_TEST_OPENSHELL_SUPERVISOR_IMAGE`     | Imported immutable OpenShell supervisor image pinned by SHA-256 digest.                                                                                |
-| `OCC_TEST_OPENSHELL_CHART_VERSION`        | Optional OpenShell chart version; defaults to `0.1.3-pre.1`.                                                                                           |
+| `OCC_TEST_OPENSHELL_CHART_VERSION`        | Optional OpenShell chart version; defaults to `0.1.3-pre.2`.                                                                                           |
 | `OCC_TEST_OPENSHELL_RUNTIME_CLASS`        | Existing RuntimeClass used by Agent Sandbox Pods; CI creates the selected RuntimeClass, defaulting to `openshell-sandbox`, with the `runc` handler.    |
 
 The selected cluster must already expose the Agent Sandbox CRD and a ready Agent
@@ -325,7 +325,7 @@ Sandbox controller. See the
 [OpenShell SandboxDriver testing guide](#openshell-sandbox) for
 the required cluster, image, database, RuntimeClass, and chart setup.
 
-The CI bootstrap verifies the `v0.1.3-pre.1` source archive checksum, packages
+The CI bootstrap verifies the `v0.1.3-pre.2` source archive checksum, packages
 the chart from that tag, and imports gateway, sandbox runtime, and supervisor
 images published under the tag's commit SHA. It does not depend on prerelease
 GitHub Release assets or a semver-tagged chart.

@@ -6,7 +6,7 @@ Gateway with dedicated Codex and native OpenClaw Harnesses and the bundled
 Agents, revisions, Namespaces, routing, credentials, and authorization.
 
 **The OpenShell integration is a work in progress.** Stock OpenShell
-[`v0.1.3-pre.1`](https://github.com/NVIDIA/OpenShell/tree/v0.1.3-pre.1) cannot accept the
+[`v0.1.3-pre.2`](https://github.com/NVIDIA/OpenShell/tree/v0.1.3-pre.2) cannot accept the
 Secret-backed app-server token or projected workload identity a dedicated Agent
 requires. The model API key is no longer a blocker: the paired
 [OpenShell Credential Gateway](openshell-credential-gateway.md) delivers it. The
@@ -147,16 +147,16 @@ Do not add a policy for the model endpoint. The credential source's provider
 profile allows `api.openai.com` with TLS inspection, and an uninspected rule for
 the same host conflicts with it.
 
-Each v0.1.3-pre.1 network policy requires at least one binary identity with a nonempty
+Each v0.1.3-pre.2 network policy requires at least one binary identity with a nonempty
 executable path. OpenShell applies the endpoints only to those
 binaries. The optional endpoint fields use OpenShell's configuration spellings: `tls`
 accepts `skip` or `terminate`; `enforcement` accepts `enforce` or `audit`; and
-`access` accepts `read_only`, `read_write`, or `full`. OpenShell v0.1.3-pre.1 treats
+`access` accepts `read_only`, `read_write`, or `full`. OpenShell v0.1.3-pre.2 treats
 `terminate` as a deprecated alias for automatic TLS detection and termination.
 It also changed the old `passthrough` spelling to that behavior, so the Driver
 rejects `passthrough` at startup. Replace `tls: passthrough` with `tls: skip` to
 retain uninspected TLS relay.
-`gatewayConfigured` is the only ServiceAccount mode for `v0.1.3-pre.1`; the
+`gatewayConfigured` is the only ServiceAccount mode for `v0.1.3-pre.2`; the
 gateway's configured sandbox ServiceAccount applies to every Sandbox it creates
 and does not satisfy the per-Agent production requirement below.
 
@@ -172,7 +172,7 @@ the Driver mutates Kubernetes or calls the Gateway. Configure the Gateway's
 Kubernetes driver with `workspaceMode: operator` and a namespace selector
 matching `operatorNamespaceLabels`. In this mode the OpenShell Workspace name
 must equal its pre-provisioned Kubernetes namespace, so OCC uses a stable
-`oce-` name with a 15-character digest to stay within OpenShell v0.1.3-pre.1's
+`oce-` name with a 15-character digest to stay within OpenShell v0.1.3-pre.2's
 19-character Workspace limit.
 
 The Kubernetes development profile acts as the operator for its disposable
@@ -264,7 +264,7 @@ origin, rewrites its port to the configured gateway endpoint for local
 port-forwards, and requires a valid route before provisioning succeeds.
 
 OCE omits `authorization_mode`, so OpenShell strips `Authorization` before proxying.
-Upstream v0.1.3-pre.1 supports `BEARER_PASSTHROUGH`, which OCE leaves unselected.
+Upstream v0.1.3-pre.2 supports `BEARER_PASSTHROUGH`, which OCE leaves unselected.
 Codex accepts only bearer authorization. The integration expects the protected
 app server's `401` through this route and runs its real model turn on Pod
 loopback. It does not treat the test bridge as supported or replace Compute's
@@ -323,7 +323,7 @@ and Driver integration:
   creates for the Harness.
 - OpenShell must preserve the Harness's exact audience-bound, short-lived
   projected ServiceAccount token and read-only mount. Its gateway bootstrap
-  token is not a substitute. Stock OpenShell `v0.1.3-pre.1` does not support
+  token is not a substitute. Stock OpenShell `v0.1.3-pre.2` does not support
   projected volumes in gateway driver configuration. An operator-created
   template bridge is not a supported workaround.
 - OpenShell must preserve all approved Agent workspace PVC subpath mounts
@@ -337,7 +337,7 @@ and Driver integration:
   entrypoint reads these files even when the Agent selects no optional plugins.
 - OpenShell must support exact environment entries backed by Kubernetes
   `secretKeyRef` for the startup app-server token Secret. Stock OpenShell
-  `v0.1.3-pre.1` cannot receive those entries through the current gateway API, and the
+  `v0.1.3-pre.2` cannot receive those entries through the current gateway API, and the
   Enterprise Driver rejects them. A credential bridge is not a supported
   workaround. The model API key uses the Credential Gateway instead.
 - OpenShell gateway authentication must be bound to the trusted caller and the
@@ -372,9 +372,9 @@ Common fail-closed errors include:
 - `OpenShell gateway Pod is not ready.`
 - `OpenShell SandboxDriver supports only dedicated Codex or OpenClaw Harness revisions.`
   Deployment status reports `SANDBOX_HARNESS_UNSUPPORTED`.
-- `OpenShell v0.1.3-pre.1 cannot receive secretKeyRef environment APP_SERVER_TOKEN ...`
+- `OpenShell v0.1.3-pre.2 cannot receive secretKeyRef environment APP_SERVER_TOKEN ...`
   Deployment status reports `SANDBOX_SECRET_ENVIRONMENT_UNSUPPORTED` after one
-  attempt; redeploying the same revision cannot succeed on stock `v0.1.3-pre.1`.
+  attempt; redeploying the same revision cannot succeed on stock `v0.1.3-pre.2`.
 
 ## Related documentation
 

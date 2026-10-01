@@ -118,7 +118,7 @@ export OCC_DEVELOPMENT_SANDBOX_DRIVER=openshell
 The checkout-local CLI creates one k3d cluster and then:
 
 1. installs the pinned Agent Sandbox controller and OpenShell
-   `v0.1.3-pre.1` assets;
+   `v0.1.3-pre.2` assets;
 2. imports digest-resolved OpenShell, OCE controller, Agent runtime, and
    PostgreSQL images;
 3. creates `oce-system` and installs PostgreSQL, OpenShell Gateway, and the OCE
@@ -418,7 +418,7 @@ for both scoped RoleBindings.
 - This is a development environment, not a production deployment recipe.
 - The OpenShell profile installs one central Gateway per cluster. OCC runs in
   the cluster and creates tenant resources in separate `oce-*` Namespaces.
-- Stock OpenShell `v0.1.3-pre.1` remains fail-closed for unsupported Secret and
+- Stock OpenShell `v0.1.3-pre.2` remains fail-closed for unsupported Secret and
   workload-identity projections. Workspace readiness does not prove that an
   Agent Sandbox can start or complete a model turn.
 - OpenShell Gateway permits unauthenticated users only inside this disposable,

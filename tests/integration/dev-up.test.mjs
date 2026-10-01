@@ -1084,7 +1084,7 @@ test("Kubernetes dev-up prepares the selected OpenShell Sandbox Driver before re
   );
   assert.ok(
     gatewayInstall.args.includes(
-      "--set-string=gateway.image.digest=sha256:9be15b267390fb73353b8862dade4dc13476f13175cf709e174d74bdf5f08e39",
+      "--set-string=gateway.image.digest=sha256:17b2f65d1e33f32a419ecc98dd42389b0227280be54139c14834933ec29420ea",
     ),
   );
   assert.equal(

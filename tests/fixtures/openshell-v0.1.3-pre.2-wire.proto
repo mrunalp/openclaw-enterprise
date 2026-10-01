@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Independent wire oracle extracted from NVIDIA OpenShell commit
-// dde8a9a57f34f9d998618b3d35821608165c980f. Keep this fixture pinned to that
+// 021400be8af471f8669369e679de3e18cf0bd672. Keep this fixture pinned to that
 // upstream contract; do not derive it from the production client proto.
 syntax = "proto3";
 
