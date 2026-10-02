@@ -9,6 +9,7 @@ import type {
   AuthorizationDecision,
   AuthorizationRequest,
   ComputeDriver,
+  ComputePrepareRevisionFailureDiagnostic,
   CredentialWithdrawal,
   PluginDeploymentWarning,
   PluginDriver,
@@ -280,6 +281,34 @@ interface DeployTiming {
 }
 
 const MAX_DEPLOY_TIMINGS = 256;
+const SAFE_COMPUTE_FAILURE_CODE = /^[A-Z][A-Z0-9_]{0,63}$/;
+const SAFE_COMPUTE_FAILURE_STAGE = /^[a-z][a-z0-9_]{0,63}$/;
+const SAFE_COMPUTE_FAILURE_CLASS = /^[A-Za-z][A-Za-z0-9]{0,63}$/;
+const MAX_COMPUTE_FAILURE_MESSAGE_LENGTH = 256;
+
+function printableComputeFailureMessage(value: string): boolean {
+  return (
+    value.length <= MAX_COMPUTE_FAILURE_MESSAGE_LENGTH &&
+    [...value].every((character) => {
+      const codePoint = character.codePointAt(0)!;
+      return codePoint >= 32 && codePoint !== 127;
+    })
+  );
+}
+
+function validComputeFailureDiagnostic(
+  value: ComputePrepareRevisionFailureDiagnostic | undefined,
+): value is ComputePrepareRevisionFailureDiagnostic {
+  return (
+    value !== undefined &&
+    SAFE_COMPUTE_FAILURE_CODE.test(value.code) &&
+    SAFE_COMPUTE_FAILURE_STAGE.test(value.stage) &&
+    (value.errorClass === undefined || SAFE_COMPUTE_FAILURE_CLASS.test(value.errorClass)) &&
+    (value.message === undefined || printableComputeFailureMessage(value.message)) &&
+    (value.status === undefined ||
+      (Number.isSafeInteger(value.status) && value.status >= 0 && value.status <= 999))
+  );
+}
 
 function workLogFields(claim: ClaimedWork): {
   readonly workId: string;
@@ -1098,6 +1127,29 @@ export class ControllerWorker {
         }
       }
       return prepared;
+    } catch (error) {
+      let diagnostic: ComputePrepareRevisionFailureDiagnostic | undefined;
+      try {
+        diagnostic = this.compute.describePrepareRevisionFailure?.(error);
+      } catch {
+        // Diagnostics must never replace the Compute failure that owns retry behavior.
+      }
+      if (validComputeFailureDiagnostic(diagnostic)) {
+        this.emit({
+          event: "worker.compute-prepare-failed",
+          ...workLogFields(claim),
+          namespaceId: revision.namespaceId,
+          agentId: revision.agentId,
+          revisionId: revision.id,
+          computeDriverId: this.compute.id,
+          code: diagnostic.code,
+          step: diagnostic.stage,
+          ...(diagnostic.errorClass === undefined ? {} : { errorClass: diagnostic.errorClass }),
+          ...(diagnostic.message === undefined ? {} : { message: diagnostic.message }),
+          ...(diagnostic.status === undefined ? {} : { status: diagnostic.status }),
+        });
+      }
+      throw error;
     } finally {
       if (timing !== undefined) {
         timing.prepareMs += Date.now() - started;

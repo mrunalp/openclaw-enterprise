@@ -331,7 +331,7 @@ func (r *runner) importDevelopmentImage(ctx context.Context, s *developmentState
 // The local profile trusts only Pod loopback; first-agent verifies model access
 // with the separate loopback password. Routed installations supply Envoy source CIDRs.
 // statusProxySource is the API server's Pod proxy source (developmentStatusProxySource).
-func writeInstallation(s *developmentState, reference string, openShell *openShellDevelopmentAssets, codexSeccompProfile string, statusProxySource string) error {
+func writeInstallation(s *developmentState, reference string, openShell *openShellDevelopmentAssets, openShellGatewayAddress string, codexSeccompProfile string, statusProxySource string) error {
 	if statusProxySource == "" {
 		return fmt.Errorf("the development Installation requires the API server Pod proxy source")
 	}
@@ -375,6 +375,24 @@ func writeInstallation(s *developmentState, reference string, openShell *openShe
 		if openShell == nil {
 			return fmt.Errorf("OpenShell development assets are required")
 		}
+		if openShellGatewayAddress == "" {
+			return fmt.Errorf("OpenShell Gateway address is required")
+		}
+		compute := config["drivers"].(map[string]any)["compute"].(map[string]any)["configuration"].(map[string]any)
+		compute["servicePrincipalCredentials"] = map[string]any{"mode": "disabled"}
+		gatewayNamespace := openShellGatewayNamespace
+		if s.DeploymentMode == "k3d" {
+			gatewayNamespace = s.PlatformNamespace
+		}
+		compute["network"].(map[string]any)["providerHarness"] = map[string]any{
+			"namespace": gatewayNamespace,
+			"podLabels": map[string]string{
+				"app.kubernetes.io/name":     "openshell",
+				"app.kubernetes.io/instance": openShellGatewayService,
+			},
+			"address": openShellGatewayAddress,
+			"port":    8080,
+		}
 		config["drivers"].(map[string]any)["sandbox"] = openShellInstallationConfiguration(s, openShell.workspaceResources)
 		config["drivers"].(map[string]any)["credential_gateway"] = map[string]any{
 			"id":            openShellCredentialGatewayID,
@@ -408,8 +426,12 @@ func openShellBackendConfiguration(s *developmentState) map[string]any {
 		"type": "openshell",
 		// The development gateway is unauthenticated plain HTTP; the profile's NetworkPolicies
 		// admit only the OCE API, worker, and OpenShell supervisors.
-		"configuration": map[string]any{"endpoint": endpoint, "insecureTransport": "network-policy"},
-		"drivers":       map[string]string{"sandbox": openShellSandboxID, "credential_gateway": openShellCredentialGatewayID},
+		"configuration": map[string]any{
+			"endpoint":          endpoint,
+			"insecureTransport": "network-policy",
+			"requestTimeoutMs":  30000,
+		},
+		"drivers": map[string]string{"sandbox": openShellSandboxID, "credential_gateway": openShellCredentialGatewayID},
 	}
 }
 
@@ -425,6 +447,9 @@ func openShellInstallationConfiguration(s *developmentState, workspaceResources 
 	return map[string]any{
 		"id": openShellSandboxID,
 		"configuration": map[string]any{
+			// OpenShell v0.1.3-pre.2 exposes the route before the canonical
+			// process listens. Keep the first Gateway from consuming it early.
+			"startupDelayMs": 30000,
 			"gateway": map[string]any{
 				"workspaceMode": "operator",
 				"operatorNamespaceLabels": map[string]string{

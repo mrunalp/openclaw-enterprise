@@ -297,7 +297,7 @@ for (let attempt = 0; attempt < 4; attempt++) {
     entrypoint,
   ].join("\n");
   const result = spawnSync(process.execPath, ["-e", substitute], {
-    env: { PATH: process.env.PATH, HOME: "/home/node", OPENCLAW_NODE_STATE_DIR: "/tmp/node-state", OPENCLAW_NODE_SETUP_CODE: "synthetic-setup", OPENCLAW_WORKSPACE_BOOTSTRAP: JSON.stringify(bootstrap) },
+    env: { PATH: process.env.PATH, HOME: "/home/node", OPENCLAW_NODE_STATE_DIR: "/tmp/node-state", OPENCLAW_NODE_SETUP_CODE: "synthetic-setup", OPENCLAW_WORKSPACE_DIR: "/home/node/workspace", OPENCLAW_WORKSPACE_BOOTSTRAP: JSON.stringify(bootstrap) },
     encoding: "utf8",
   });
   if (attempt === 3) {
@@ -1231,7 +1231,7 @@ const environment = {
   HOME: "/home/node", CODEX_HOME: "/home/node/.codex",
   CODEX_LOGIN_MODE: "api_key", OPENAI_API_KEY: "synthetic-offline-key",
   OPENCLAW_HARNESS_MODEL: "codex/gpt-5",
-  APP_SERVER_TOKEN: "synthetic-transport-token", APP_SERVER_PORT: "4500",
+  APP_TOKEN_SHA: ${JSON.stringify(createHash("sha256").update("synthetic-transport-token").digest("hex"))}, APP_SERVER_PORT: "4500",
 };
 let native;
 // The entrypoint arrives on stdin: inlined, it can exceed the per-argument limit.
@@ -1257,6 +1257,7 @@ vm.runInNewContext(fs.readFileSync(0, "utf8"), {
         assert.ok(appServer > 0);
         const appServerEnvironment = options.env ?? environment;
         assert.equal(Object.hasOwn(appServerEnvironment, "APP_SERVER_TOKEN"), false);
+        assert.equal(Object.hasOwn(appServerEnvironment, "APP_TOKEN_SHA"), false);
         native = cp.spawn(command, [...args.slice(0, appServer + 1), "--listen", "stdio://"], {
           ...options, env: appServerEnvironment, stdio: ["pipe", "pipe", "pipe"],
         });
@@ -1292,7 +1293,7 @@ const timeout = setTimeout(() => { native.kill("SIGKILL"); process.exitCode = 1;
     assert.equal(config.allow_login_shell, false);
     assert.equal(config.shell_environment_policy.set.PATH, environment.PATH);
     const result = await rpc("command/exec", {
-      command: ["/bin/bash", "-c", 'test -z "$APP_SERVER_TOKEN" || exit 1; command -v gh; command -v git; git config --system --get-all include.path'],
+      command: ["/bin/bash", "-c", 'test -z "$APP_SERVER_TOKEN" || exit 1; test -z "$APP_TOKEN_SHA" || exit 1; command -v gh; command -v git; git config --system --get-all include.path'],
       sandboxPolicy: { type: "externalSandbox", networkAccess: "restricted" },
       timeoutMs: 5000,
     });

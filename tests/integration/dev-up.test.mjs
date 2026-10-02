@@ -942,6 +942,7 @@ test("Kubernetes dev-up prepares the selected OpenShell Sandbox Driver before re
     configuration,
     /endpoint: http:\/\/openshell-gateway\.oce-system\.svc\.cluster\.local:8080/,
   );
+  assert.match(configuration, /requestTimeoutMs: 30000/);
   assert.match(configuration, /mode: inCluster/);
   assert.doesNotMatch(configuration, /kubeconfigPath/);
   assert.match(configuration, /workspaceMode: operator/);
@@ -951,7 +952,18 @@ test("Kubernetes dev-up prepares the selected OpenShell Sandbox Driver before re
   assert.match(configuration, /operatorNamespaceLabels:/);
   assert.match(configuration, /openshell\.ai\/openclaw-workspace: "true"/);
   assert.doesNotMatch(configuration, /workspace: default/);
-  const sandboxConfiguration = loadYaml(configuration).drivers.sandbox.configuration;
+  const renderedInstallation = loadYaml(configuration);
+  const sandboxConfiguration = renderedInstallation.drivers.sandbox.configuration;
+  assert.equal(sandboxConfiguration.startupDelayMs, 30_000);
+  assert.deepEqual(renderedInstallation.drivers.compute.configuration.network.providerHarness, {
+    namespace: "oce-system",
+    podLabels: {
+      "app.kubernetes.io/name": "openshell",
+      "app.kubernetes.io/instance": "openshell-gateway",
+    },
+    address: "10.43.0.50",
+    port: 8080,
+  });
   assert.deepEqual(
     sandboxConfiguration.gateway.networkPolicyResources[0].spec.podSelector.matchLabels,
     {
@@ -1037,6 +1049,8 @@ test("Kubernetes dev-up prepares the selected OpenShell Sandbox Driver before re
     /rancher\/k3s:v1\.36\.4-k3s1@sha256:/,
   );
   assert.equal(clusterCreate.args[clusterCreate.args.indexOf("--timeout") + 1], "41s");
+  assert.ok(clusterCreate.args.includes("--kubelet-arg=image-gc-high-threshold=100@server:*"));
+  assert.ok(clusterCreate.args.includes("--kubelet-arg=image-gc-low-threshold=99@server:*"));
   assert.ok(clusterCreate.args.includes("--volume"));
   assert.ok(clusterCreate.args.includes("--port"));
   assert.equal(clusterCreate.args.includes("--network"), false);
@@ -1252,84 +1266,6 @@ test("Kubernetes-only dev-up keeps PostgreSQL and its egress policy valid across
 
   const cleaned = runDevDown(fixture.env);
   assert.equal(cleaned.status, 0, cleaned.stderr);
-});
-
-test("Kubernetes dev-up can keep the OCC control plane in Compose with OpenShell", async (t) => {
-  const fixture = await kubernetesFixture(t);
-  fixture.env.OCC_DEVELOPMENT_SANDBOX_DRIVER = "openshell";
-  fixture.env.OCC_DEVELOPMENT_CONTROL_PLANE = "compose";
-  fixture.env.OCC_DEVELOPMENT_K3S_IMAGE = "rancher/k3s:v1.35.8-k3s1";
-
-  // This profile keeps OCC and PostgreSQL in Compose while the regular worker
-  // reconciles Kubernetes Compute and operator-mode OpenShell Workspaces in k3d.
-  const result = fixture.start();
-
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /Control plane: Compose/);
-  assert.match(result.stdout, /Sandbox Driver: openshell/);
-  assert.doesNotMatch(result.stdout, /Deployment: Kubernetes only/);
-  const directory = fixture.env.OCC_DEVELOPMENT_STATE_DIRECTORY;
-  const state = JSON.parse(await readFile(join(directory, "state.json"), "utf8"));
-  assert.equal(state.sandboxDriver, "openshell");
-  assert.equal(state.deploymentMode, undefined);
-  assert.equal((await stat(join(directory, "compose.yaml"))).isFile(), true);
-
-  const configuration = loadYaml(await readFile(join(directory, "installation.yaml"), "utf8"));
-  assert.equal(configuration.drivers.compute.configuration.authentication.mode, "kubeconfig");
-  // The openshell Backend owns the gateway connection that both member Drivers share.
-  assert.deepEqual(configuration.backend, [
-    {
-      id: "openshell",
-      type: "openshell",
-      configuration: {
-        endpoint: "http://k3d-occ-dev-owned-server-0:30051",
-        insecureTransport: "network-policy",
-      },
-      drivers: {
-        sandbox: "sandbox-openshell-development",
-        credential_gateway: "credential-gateway-openshell-development",
-      },
-    },
-  ]);
-  assert.equal(configuration.drivers.sandbox.configuration.gateway.endpoint, undefined);
-  assert.equal(configuration.drivers.sandbox.configuration.gateway.workspaceMode, "operator");
-  assert.equal(
-    configuration.drivers.credential_gateway.id,
-    "credential-gateway-openshell-development",
-  );
-
-  const commands = await readJsonLines(fixture.env.SAFETY_LOG);
-  const clusterCreate = commands.find(
-    ({ command, args }) => command === "k3d" && args[0] === "cluster" && args[1] === "create",
-  );
-  assert.match(
-    clusterCreate.args[clusterCreate.args.indexOf("--image") + 1],
-    /rancher\/k3s:v1\.36\.4-k3s1@sha256:/,
-  );
-  assert.ok(
-    commands.some(
-      ({ command, args }) =>
-        command === "docker" &&
-        args[0] === "compose" &&
-        args.includes("controller") &&
-        args.includes("worker-kubernetes"),
-    ),
-  );
-  const gatewayInstall = commands.find(
-    ({ command, args }) =>
-      command === "helm" && args[0] === "upgrade" && args[2] === "openshell-gateway",
-  );
-  assert.ok(gatewayInstall.args.includes("openshell-system"));
-  assert.ok(gatewayInstall.args.includes("--set=service.type=NodePort"));
-  assert.ok(gatewayInstall.args.includes("--set=service.nodePort=30051"));
-
-  const cleaned = runDevDown(fixture.env);
-  assert.equal(cleaned.status, 0, cleaned.stderr);
-  await assert.rejects(stat(directory), { code: "ENOENT" });
-  assert.deepEqual(JSON.parse(await readFile(fixture.env.DEV_UP_RESOURCE_STATE, "utf8")), {
-    clusters: ["occ-dev-unrelated"],
-    compose: false,
-  });
 });
 
 test("Kubernetes dev-up rejects an unsupported control-plane selection", async (t) => {

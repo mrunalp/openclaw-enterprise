@@ -204,6 +204,11 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 		"--k3s-arg", "--tls-san=k3d-" + state.Cluster + "-serverlb@server:*",
 		"--env", "IPTABLES_MODE=legacy@server:0",
 		"--k3s-arg", fmt.Sprintf("--kubelet-arg=eviction-hard=memory.available<100Mi,nodefs.available<%d%%,nodefs.inodesFree<5%%,imagefs.available<%d%%,imagefs.inodesFree<5%%@server:*", threshold, threshold),
+		// The local profile uses imagePullPolicy Never with verified digest aliases. Keep
+		// their content until dev-down removes the disposable node; ordinary image GC
+		// otherwise drops idle Sandbox images on a busy developer host.
+		"--k3s-arg", "--kubelet-arg=image-gc-high-threshold=100@server:*",
+		"--k3s-arg", "--kubelet-arg=image-gc-low-threshold=99@server:*",
 		"--kubeconfig-update-default=false", "--kubeconfig-switch-context=false",
 	}
 	resolverArgs, err := r.prepareDevelopmentResolver(state)
@@ -295,11 +300,18 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 	if err != nil {
 		return err
 	}
-	if err := writeInstallation(state, runtimeImage, assets, codexSeccompProfile, statusProxySource); err != nil {
+	openShellGatewayAddress := ""
+	if sandboxDriver == "openshell" {
+		openShellGatewayAddress, err = r.openShellGatewayAddress(ctx, state.PlatformNamespace)
+		if err != nil {
+			return err
+		}
+	}
+	if err := writeInstallation(state, runtimeImage, assets, openShellGatewayAddress, codexSeccompProfile, statusProxySource); err != nil {
 		return err
 	}
 	if routingPodCIDR != "" {
-		if err := configureDevelopmentRouting(state, routingPodCIDR); err != nil {
+		if err := configureDevelopmentRouting(state, []string{routingPodCIDR}, developmentRoutingEndpoint{gatewayNamespace: state.PlatformNamespace}); err != nil {
 			return err
 		}
 	}
@@ -307,7 +319,7 @@ func upK3d(ctx context.Context, opts Options, sandboxDriver string) (result erro
 		return err
 	}
 	if routingPodCIDR != "" {
-		if err := r.waitDevelopmentRouting(ctx, state, routingPodCIDR, timeout); err != nil {
+		if _, err := r.waitDevelopmentRouting(ctx, state.PlatformNamespace, routingPodCIDR, timeout); err != nil {
 			return err
 		}
 	}

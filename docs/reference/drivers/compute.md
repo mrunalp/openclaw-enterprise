@@ -20,11 +20,10 @@ The [shared contracts](../../../packages/contracts/src/index.ts) define the type
 Every `ComputeDriver` has an `id`, `implementation`, and
 `capability: "compute"`.
 
-The optional `getRuntimeImages(revision)` method observes containers belonging to
-that admitted revision and returns `{workload, container, image, imageId, commit, openclawCommit}`
-entries. OCC requires exact Agent read authority and calls the Driver pinned by
-the active revision. The `runtime-images` API reports `undeployed` without an
-active revision and `unsupported` when the Driver omits this method.
+`getRuntimeImages(revision)` observes admitted-revision containers and returns
+`{workload, container, image, imageId, commit, openclawCommit}` entries. OCC
+requires exact Agent read and the active revision's Driver. The API reports
+`undeployed` without an active revision and `unsupported` without the method.
 
 Docker reads each owned container's immutable image, its OCI revision label and
 `org.openclaw.image.revision` (the OpenClaw commit), even if the tag has moved.
@@ -34,12 +33,11 @@ container ID; both commits apply only to containers with that same image ID.
 Commits must be full lowercase Git SHAs. Missing IDs or provenance remain `null`.
 These observations do not inventory separate Sandbox Driver workloads.
 
-The optional `discoverHarnessModels({provider, apiKey})` returns native model IDs
-and names without persisting credentials. OCC checks Agent creation authority
-before calling it. Bundled Kubernetes and Docker call official OpenAI and
-Anthropic model-list APIs with bounded requests and no redirects. Discovery
-requires OCC API egress; it neither provisions runtime credentials nor proves
-model compatibility. Unsupported or unavailable discovery permits
+`discoverHarnessModels({provider, apiKey})` returns native model IDs and names
+without persisting credentials. OCC checks Agent creation authority first.
+Bundled Kubernetes and Docker use bounded, no-redirect OpenAI and Anthropic
+model-list requests. Discovery requires OCC API egress; it neither provisions
+credentials nor proves compatibility. Unsupported or unavailable discovery permits
 [manual model entry](../console/create-and-deploy.md).
 
 The bundled Codex OAuth device-login implementation is **Experimental**.
@@ -71,6 +69,7 @@ context is optional in TypeScript; the worker supplies it after authorization.
 | `validateHarnessAuth(harness, auth, configuration)`                    | Deployment requires this check of the Harness, authentication snapshot, and native Configuration. It must have no side effects. A missing method causes a dependency-unavailable error; a thrown error becomes a resource conflict before queueing. |
 | `activateRevision(revision, context?)`, `deactivateRevision(revision)` | Production startup requires both. The worker also calls activation if a development Driver provides it. See [revision stages](#production-revision-stages).                                                                                         |
 | `setLifecycleDrivers(drivers)`                                         | Startup requires it when another selected Driver provides [Compute hooks](#optional-selected-driver-hooks).                                                                                                                                         |
+| `describePrepareRevisionFailure(error)`                                | Returns bounded safe fields for rejected preparation. OCC attributes them to the revision without serializing the raw error. Omission preserves generic retries.                                                                                    |
 | `resolveSandboxNamespace`, `withdrawCredentialSource`                  | [Credential Gateway](credential-gateway.md#optional-additions) hooks for registration and withdrawal.                                                                                                                                               |
 | `activationOrder`, `maintenanceIntervalMs`                             | Control [activation timing](#production-revision-stages) and optional [maintenance](#optional-active-runtime-maintenance).                                                                                                                          |
 

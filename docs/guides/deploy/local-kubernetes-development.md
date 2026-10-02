@@ -7,10 +7,9 @@ Compose alternative has fewer configured capabilities.
 
 ## Start the profile
 
-Install Node.js 24 or newer, the repository-pinned pnpm, the Go version from
-`go.mod`, k3d, kubectl, Helm, and either Docker or Podman. In Kubernetes-only
-mode, the container engine hosts k3d and builds or imports images without
-running OCE application services.
+Install Node.js 24+, repository-pinned pnpm, the Go version from `go.mod`, k3d,
+kubectl, Helm, and Docker or Podman. Kubernetes-only mode uses the engine for
+k3d and images, not OCE services.
 
 K3s requires the `cpuset` cgroup controller, which systemd does not delegate to
 a rootless session. On Podman, run as root, delegate `cpuset` to your user
@@ -22,9 +21,8 @@ podman machine set --rootful
 podman machine start
 ```
 
-Rootful describes the virtual machine; keep running `podman` as your normal
-host user. Rootful and rootless keep separate container storage, so the first
-start after switching rebuilds the images.
+Keep running `podman` as your normal host user. Rootful and rootless storage is
+separate, so the first start after switching rebuilds images.
 
 On Linux without root, use a rootful machine for the Kubernetes-only profile.
 It needs `/dev/kvm`, `gvproxy`, and `virtiofsd`. List a helper directory outside
@@ -115,7 +113,7 @@ export OCC_DEVELOPMENT_SANDBOX_DRIVER=openshell
 ./scripts/dev-up
 ```
 
-The checkout-local CLI creates one k3d cluster and then:
+The checkout-local CLI creates one k3d cluster, then:
 
 1. installs the pinned Agent Sandbox controller and OpenShell
    `v0.1.3-pre.2` assets;
@@ -124,18 +122,24 @@ The checkout-local CLI creates one k3d cluster and then:
 3. creates `oce-system` and installs PostgreSQL, OpenShell Gateway, and the OCE
    Helm release there;
 4. exposes a labeled development proxy through a loopback-only k3d port map;
-5. waits for the bootstrap Namespace and its OpenShell Workspace to become
-   ready; and
-6. writes the kubeconfig and initial administrator service-key file beneath a
-   private state directory.
+5. waits for the bootstrap Namespace and Workspace; and
+6. writes kubeconfig and the administrator service key to private state.
 
 OpenShell's Agent Sandbox controller remains in its upstream
 `agent-sandbox-system` Namespace. Tenant Workspaces, Sandbox resources, and
 Agent Pods live in the OCC-owned `oce-*` Namespaces.
 
-The first start requires network access. To use reviewed local assets
-instead, set both `OCC_DEVELOPMENT_OPENSHELL_HELM_CHART` and
-`OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_HELM_CHART`, plus
+To keep PostgreSQL, the OCC API, and the Kubernetes worker in Compose, set
+`OCC_DEVELOPMENT_CONTROL_PLANE=compose` with the same OpenShell selection. This
+profile also installs the pinned private Envoy route in k3d. It mounts the
+route's service key and public CA only into the Compose controller and
+`worker-kubernetes`, then records the k3d node hostname and Envoy NodePort in
+the Installation. Do not run the separate manual hybrid-routing procedure for
+this OpenShell profile.
+
+The first start needs network access. For local assets, set
+`OCC_DEVELOPMENT_OPENSHELL_HELM_CHART`,
+`OCC_DEVELOPMENT_OPENSHELL_WORKSPACE_HELM_CHART`, and
 `OCC_DEVELOPMENT_OPENSHELL_AGENT_SANDBOX_MANIFEST` to absolute paths.
 
 To choose the host engine explicitly:
@@ -259,13 +263,10 @@ export OCC_SERVICE_KEY_FILE="<Service key file printed by scripts/dev-up>"
 ./bin/occ installation get
 ```
 
-In Kubernetes-only mode, the API is reachable only through the loopback k3d
-publication. The published Service selects a dedicated in-cluster proxy whose
-exact Namespace and Pod labels are admitted by the OCE Helm NetworkPolicy. The
-OCE API itself remains a ClusterIP Service. OCE's worker authenticates to
-Kubernetes in-cluster. When OpenShell is selected, the API, which registers
-credential sources, and the worker reach OpenShell Gateway through a narrow
-development NetworkPolicy in `oce-system`.
+In Kubernetes-only mode, a loopback k3d publication reaches a dedicated proxy
+selected by the OCE NetworkPolicy; the API remains ClusterIP. The worker uses
+in-cluster authentication. With OpenShell, the API and worker reach its Gateway
+through a narrow `oce-system` NetworkPolicy.
 
 The launcher sets `network.pluginStatusProxySourceCidrs` to the k3d node's Pod
 bridge address, the source the API server uses to proxy to Pods. That enables

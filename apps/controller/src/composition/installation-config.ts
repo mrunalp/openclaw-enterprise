@@ -959,9 +959,6 @@ export async function loadInstallationConfiguration(options: {
         "Production Kubernetes workloads require the explicitly configured Codex runtime.",
       );
     }
-    if (kubernetes.servicePrincipalCredentials.mode !== "projectedServiceAccountToken") {
-      throw new Error("Production Codex Agents require projected ServicePrincipal credentials.");
-    }
   }
   const installation = Object.freeze({
     occ: Object.freeze({ cluster }),

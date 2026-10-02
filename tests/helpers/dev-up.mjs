@@ -575,6 +575,7 @@ if (command === engine) {
   else if (args[0] === "-n" && args.includes("endpoints") && args.includes("kubernetes") && args.includes("jsonpath={.subsets[0].ports[0].port}")) output("6443");
   else if (args[0] === "-n" && args.includes("endpoints") && args.includes("kubernetes")) output("172.30.42.3");
   else if (args[0] === "get" && args[1] === "service" && args[2] === "kubernetes") output(JSON.stringify({ spec: { clusterIP: "10.43.0.1" } }));
+  else if (args[0] === "get" && args[1] === "service" && args[2] === "openshell-gateway" && args.includes("jsonpath={.spec.clusterIP}")) output("10.43.0.50");
   else if (args[0] === "get" && args[1] === "endpoints" && args[2] === "kubernetes") output(JSON.stringify({ subsets: [{ addresses: [{ ip: "172.30.41.4" }] }] }));
   else if (args[0] === "get" && args[1] === "namespaces") output(JSON.stringify({ items: [{ metadata: { name: "oce-123456789012345", labels: { "openclaw.dev/namespace": "namespace_fixture" }, annotations: { "openclaw.dev/namespace-id": "namespace_fixture" } } }] }));
   else if (args[0] === "get" && args[1] === "service" && args.includes("jsonpath={.spec.ports[0].nodePort}")) output("30051");

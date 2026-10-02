@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -518,6 +519,28 @@ func (r *runner) installOpenShellGateway(ctx context.Context, state *development
 		}
 	}
 	return nil
+}
+
+func (r *runner) openShellGatewayAddress(ctx context.Context, namespace string) (string, error) {
+	data, err := r.output(
+		ctx,
+		"kubectl",
+		"get",
+		"service",
+		openShellGatewayService,
+		"--namespace",
+		namespace,
+		"-o",
+		"jsonpath={.spec.clusterIP}",
+	)
+	if err != nil {
+		return "", fmt.Errorf("resolve OpenShell Gateway address: %w", err)
+	}
+	address := string(data)
+	if net.ParseIP(address) == nil {
+		return "", fmt.Errorf("OpenShell Gateway returned an invalid ClusterIP")
+	}
+	return address, nil
 }
 
 func openShellImageValues(prefix, image string) []string {

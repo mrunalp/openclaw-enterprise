@@ -11,7 +11,7 @@ Trace host preflight, database initialization, and API/worker startup. See the [
 ## Overview
 
 From a checkout, `scripts/dev-up` selects Docker or Kubernetes Compute and
-starts the requested development topology. Docker Compute and Compose-backed
+starts the development topology. Docker Compute and Compose-backed
 Kubernetes profiles run PostgreSQL, migration, bootstrap, API, and worker in
 Compose. The explicitly selected Kubernetes-only profile runs them in the owned
 k3d cluster. This flow ends after authenticated Installation and bootstrap
@@ -197,8 +197,8 @@ configuration volume.
 `internal/occdev/gateway_k3d.go:installDevelopmentRoutingControllers`,
 `internal/occdev/repository_k3d.go:enableDevelopmentRepository`.
 
-Both profiles use legacy iptables and honor the explicit IPv4 node DNS resolver
-without changing host DNS. Kubernetes-only startup imports matching OCE images
+Both profiles use legacy iptables and the configured IPv4 node DNS resolver.
+Kubernetes-only startup imports matching OCE images
 and runs PostgreSQL, migration, bootstrap, API and worker in Kubernetes.
 
 Without OpenShell, it verifies the pinned cert-manager and Envoy Gateway

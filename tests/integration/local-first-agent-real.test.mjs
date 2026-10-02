@@ -1,18 +1,25 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
-import { selectFirstAgentModel } from "../../scripts/first-agent-model.mjs";
+import { selectFirstAgentModel, verifyFirstAgentModel } from "../../scripts/first-agent-model.mjs";
 import { localFirstAgentStack } from "../helpers/local-first-agent-stack.mjs";
 
 const repoRoot = fileURLToPath(new URL("../../", import.meta.url));
 const firstAgentScript = fileURLToPath(new URL("../../scripts/first-agent.mjs", import.meta.url));
 const selected = process.env.OCC_TEST_LOCAL_FIRST_AGENT_REAL === "1";
+const selectedHarness = process.env.OCC_TEST_LOCAL_FIRST_AGENT_HARNESS ?? "openclaw";
+assert.match(selectedHarness, /^(?:openclaw|codex)$/);
+const selectedSandboxDriver = process.env.OCC_TEST_LOCAL_FIRST_AGENT_SANDBOX_DRIVER ?? "none";
+assert.match(selectedSandboxDriver, /^(?:none|openshell)$/);
+if (selectedSandboxDriver === "openshell") {
+  assert.equal(selectedHarness, "codex", "OpenShell first-Agent proof requires dedicated Codex.");
+}
 const execFileAsync = promisify(execFile);
 const maxOutputLength = 32_768;
 const commandTimeout = 30 * 60_000;
@@ -36,8 +43,9 @@ function runFirstAgent({
   env,
   signal,
   timeout = commandTimeout,
+  harness = selectedHarness,
 }) {
-  const args = [firstAgentScript, name];
+  const args = [firstAgentScript, name, "--harness", harness];
   if (prompt !== undefined) {
     args.push("--prompt", prompt);
   }
@@ -122,12 +130,14 @@ function readResult({ stdout, stderr }, expectedReply) {
   const diagnostic = `First-Agent command output:\n${stdout}\n${stderr}`;
   const agent = /^Agent ID: (agt_[A-Za-z0-9_-]+)\r?$/m.exec(stdout);
   const revision = /^Revision: (rev_[A-Za-z0-9_-]+)\r?$/m.exec(stdout);
-  const model = /^Model: (openai\/[A-Za-z0-9._-]+)\r?$/m.exec(stdout);
+  const harness = /^Harness: (openclaw|codex)\r?$/m.exec(stdout);
+  const model = /^Model: ((?:openai|codex)\/[A-Za-z0-9._-]+)\r?$/m.exec(stdout);
   const proof = /^Model response verified: (FIRST_AGENT_[A-Fa-f0-9-]+)\r?$/m.exec(stdout);
   const consoleLine = /^Console: ([^\r\n]+)\r?$/m.exec(stdout);
   const replyHeading = /(?:^|\n)Agent response:\r?\n/.exec(stdout);
 
   assert.ok(agent, `Missing Agent ID.\n${diagnostic}`);
+  assert.equal(harness?.[1], selectedHarness, `Unexpected Harness.\n${diagnostic}`);
   assert.ok(revision, `Missing revision.\n${diagnostic}`);
   assert.ok(model, `Missing selected model.\n${diagnostic}`);
   assert.ok(proof, `Missing generated model verification nonce.\n${diagnostic}`);
@@ -173,6 +183,30 @@ async function readPrivateJson(path, label) {
     return JSON.parse(await readFile(path, "utf8"));
   } catch {
     throw new Error(`Could not read ${label}.`);
+  }
+}
+
+async function readKubernetesJson({ stateDirectory, cluster, env }, args, label) {
+  const environment = { ...env };
+  delete environment.OPENAI_API_KEY;
+  delete environment.OPENAI_API_KEY_FILE;
+  try {
+    const { stdout } = await execFileAsync(
+      "kubectl",
+      [
+        "--kubeconfig",
+        join(stateDirectory, "kubeconfig"),
+        "--context",
+        `k3d-${cluster}`,
+        ...args,
+        "--output",
+        "json",
+      ],
+      { env: environment, timeout: 20_000, maxBuffer: 1024 * 1024 },
+    );
+    return JSON.parse(stdout);
+  } catch {
+    throw new Error(`Could not read ${label} in the local Kubernetes context.`);
   }
 }
 
@@ -279,6 +313,83 @@ test("the first-Agent command advertises its default and preserves explicit or r
   );
 });
 
+test("the first-Agent model check discovers the gateway from its execution mode", async () => {
+  const namespaceId = "ns_first_agent_placement";
+  const agentId = "agt_first_agent_placement";
+  const revisionId = "rev_first_agent_placement";
+  const digest = (value) => createHash("sha256").update(value).digest("hex").slice(0, 12);
+  const revisionConfigMap = `gateway-${digest(agentId)}-rev-${digest(revisionId)}`;
+
+  for (const expected of [
+    {
+      executionMode: "embedded",
+      namespaceLabel: "openclaw.dev/namespace",
+      namespace: "tenant-runtime",
+    },
+    {
+      executionMode: "dedicated",
+      namespaceLabel: "openclaw.dev/gateway-namespace",
+      namespace: "gateway-runtime",
+    },
+  ]) {
+    const calls = [];
+    const kubectl = async (...args) => {
+      calls.push(args);
+      if (args[0] === "get" && args[1] === "namespaces") {
+        const selector = args[args.indexOf("-l") + 1];
+        const label = selector.split("=")[0];
+        return JSON.stringify({
+          items: [
+            {
+              metadata: {
+                name:
+                  label === "openclaw.dev/gateway-namespace" ? "gateway-runtime" : "tenant-runtime",
+              },
+            },
+          ],
+        });
+      }
+      if (args[0] === "get" && args[1] === "pods") {
+        return JSON.stringify({
+          items: [
+            {
+              metadata: { name: "gateway-pod" },
+              spec: { volumes: [{ configMap: { name: revisionConfigMap } }] },
+              status: {
+                phase: "Running",
+                conditions: [{ type: "Ready", status: "True" }],
+              },
+            },
+          ],
+        });
+      }
+      if (args[0] === "exec") {
+        const input = args.at(-1)?.input ?? "";
+        const nonce = /FIRST_AGENT_[0-9a-f-]+/u.exec(input)?.[0];
+        assert.ok(nonce, "the gateway probe must include its verification nonce");
+        return JSON.stringify({ nonce });
+      }
+      throw new Error(`Unexpected kubectl invocation: ${args.join(" ")}`);
+    };
+
+    await verifyFirstAgentModel(kubectl, {
+      namespaceId,
+      agentId,
+      revisionId,
+      executionMode: expected.executionMode,
+      expectProviderKey: false,
+    });
+
+    const namespaceCall = calls.find((args) => args[0] === "get" && args[1] === "namespaces");
+    assert.equal(
+      namespaceCall?.[namespaceCall.indexOf("-l") + 1],
+      `${expected.namespaceLabel}=${namespaceId}`,
+    );
+    const execCall = calls.find((args) => args[0] === "exec");
+    assert.equal(execCall?.[execCall.indexOf("--namespace") + 1], expected.namespace);
+  }
+});
+
 test(
   "a local Kubernetes installer can deploy and reuse an Agent but cannot replace its key after external changes",
   {
@@ -338,7 +449,66 @@ test(
     );
 
     const expectedModel = env.OPENCLAW_FIRST_AGENT_MODEL || "gpt-6-astra";
-    assert.equal(first.model, `openai/${expectedModel}`);
+    assert.equal(
+      first.model,
+      `${selectedHarness === "codex" ? "codex" : "openai"}/${expectedModel}`,
+    );
+    if (selectedSandboxDriver === "openshell") {
+      const kube = { stateDirectory, cluster: recorded.cluster, env };
+      const gateways = await readKubernetesJson(
+        kube,
+        [
+          "get",
+          "deployments",
+          "--all-namespaces",
+          "--selector",
+          `openclaw.dev/agent=${first.identity.agentId},openclaw.dev/workload-role=gateway`,
+        ],
+        "the Agent Gateway",
+      );
+      assert.equal(gateways.items.length, 1);
+      const gateway = gateways.items[0];
+      const appServerUrl = gateway.spec.template.spec.containers[0].env.find(
+        ({ name: variable }) => variable === "APP_SERVER_URL",
+      )?.value;
+      assert.match(
+        appServerUrl ?? "",
+        /^ws:\/\/[a-z0-9-]+--[a-z0-9-]+\.openshell\.localhost:8080\/$/,
+      );
+      const openShellNamespace =
+        recorded.deploymentMode === "k3d" ? recorded.platformNamespace : "openshell-system";
+      const openShellGateway = await readKubernetesJson(
+        kube,
+        ["get", "service", "openshell-gateway", "--namespace", openShellNamespace],
+        "the OpenShell Gateway Service",
+      );
+      assert.deepEqual(gateway.spec.template.spec.hostAliases, [
+        {
+          ip: openShellGateway.spec.clusterIP,
+          hostnames: [new URL(appServerUrl).hostname],
+        },
+      ]);
+      const namespaces = await readKubernetesJson(
+        kube,
+        ["get", "namespaces", "--selector", `openclaw.dev/namespace=${first.namespaceId}`],
+        "the Agent Namespace",
+      );
+      assert.equal(namespaces.items.length, 1);
+      const services = await readKubernetesJson(
+        kube,
+        [
+          "get",
+          "services",
+          "--namespace",
+          namespaces.items[0].metadata.name,
+          "--selector",
+          `openclaw.dev/agent=${first.identity.agentId}`,
+        ],
+        "the Agent Service",
+      );
+      assert.equal(services.items.length, 1);
+      assert.match(services.items[0].spec.selector["app.kubernetes.io/name"], /-inactive$/);
+    }
     const reuseEnv = { ...env };
     delete reuseEnv.OPENCLAW_FIRST_AGENT_MODEL;
     delete reuseEnv.OPENAI_API_KEY;
@@ -392,14 +562,54 @@ test(
       /^cfg_[A-Za-z0-9_-]+$/.test(agent.configurationId ?? ""),
       "The public Agent must expose its Configuration",
     );
-    const secretId = agent.harnessAuth?.source?.id;
-    assert.ok(
-      agent.harnessAuth?.method === "api_key" &&
-        agent.harnessAuth.source?.kind === "secret" &&
-        agent.harnessAuth.source?.namespaceId === first.namespaceId &&
-        /^sec_[A-Za-z0-9_-]+$/.test(secretId ?? ""),
-      "The public Agent must reference an exact Secret in its Namespace",
-    );
+    let secretId;
+    if (selectedSandboxDriver === "openshell") {
+      assert.match(agent.harnessAuth?.sourceId ?? "", /^cs_[A-Za-z0-9_-]+$/);
+      assert.equal(agent.harnessAuth?.method, "credential_source");
+      const source = await requestLocalApi(
+        first.origin,
+        serviceKey,
+        "GET",
+        `${base}/credential-sources/${agent.harnessAuth.sourceId}`,
+      );
+      assert.equal(source.type, "openai");
+      assert.equal(source.state, "ready");
+      assert.equal(source.secrets.api_key?.kind, "secret");
+      assert.equal(source.secrets.api_key?.namespaceId, first.namespaceId);
+      secretId = source.secrets.api_key?.id;
+      const bindings = await requestLocalApi(
+        first.origin,
+        serviceKey,
+        "GET",
+        `${base}/iam/access-bindings`,
+      );
+      assert.ok(
+        bindings.some(
+          (binding) =>
+            binding.subjectId === agent.servicePrincipalId &&
+            binding.resourceKind === "credential_source" &&
+            binding.resourceId === source.id,
+        ),
+        "The Agent must receive exact CredentialSource access.",
+      );
+      assert.equal(
+        bindings.some(
+          (binding) =>
+            binding.subjectId === agent.servicePrincipalId && binding.resourceKind === "secret",
+        ),
+        false,
+        "The OpenShell Agent must not receive Secret access.",
+      );
+    } else {
+      secretId = agent.harnessAuth?.source?.id;
+      assert.ok(
+        agent.harnessAuth?.method === "api_key" &&
+          agent.harnessAuth.source?.kind === "secret" &&
+          agent.harnessAuth.source?.namespaceId === first.namespaceId,
+        "The public Agent must reference an exact Secret in its Namespace",
+      );
+    }
+    assert.match(secretId ?? "", /^sec_[A-Za-z0-9_-]+$/);
     const secretLookup = {
       stateDirectory,
       cluster: recorded.cluster,
@@ -411,9 +621,10 @@ test(
     const configurationPath = `${base}/configurations/${agent.configurationId}`;
     const original = await requestLocalApi(first.origin, serviceKey, "GET", configurationPath);
     assert.equal(original.values.agents.defaults.model, first.model);
-    assert.deepEqual(original.values.models.providers.openai.models, [
-      { id: expectedModel, name: expectedModel },
-    ]);
+    assert.deepEqual(
+      original.values.models.providers[selectedHarness === "codex" ? "codex" : "openai"].models,
+      [{ id: expectedModel, name: expectedModel }],
+    );
     assert.ok(
       Number.isInteger(original.generation),
       "The public Configuration must expose its generation",

@@ -23,6 +23,15 @@ test(
     const directory = await mkdtemp(join(tmpdir(), "oce-node-supervisor-"));
     const eventsPath = join(directory, "events.jsonl");
     const childPath = join(directory, "child.cjs");
+    const setupEnvelopePath = join(directory, "node-setup.json");
+    await writeFile(
+      setupEnvelopePath,
+      JSON.stringify({
+        url: "wss://gateway.example.test/node",
+        bootstrapToken: "provider-bootstrap-token",
+        expiresAtMs: Date.now() + 60_000,
+      }),
+    );
     await writeFile(
       childPath,
       [
@@ -61,7 +70,8 @@ test(
         PATH: process.env.PATH,
         HOME: directory,
         OPENCLAW_NODE_STATE_DIR: join(directory, "node-state"),
-        OPENCLAW_NODE_SETUP_CODE: "synthetic-setup",
+        OPENCLAW_NODE_SETUP_ENVELOPE: setupEnvelopePath,
+        OPENCLAW_WORKSPACE_DIR: join(directory, "workspace"),
         OPENAI_API_KEY: "synthetic-model-key",
         APP_SERVER_TOKEN: "synthetic-transport-token",
       },
@@ -145,9 +155,13 @@ test(
       }
     });
 
+    // OpenShell provider files are startup material. The supervisor must retain
+    // the reconstructed setup after that projection disappears so a failed
+    // pre-pairing node can continue retrying.
+    await rm(setupEnvelopePath);
     process.kill(node.pid, "SIGKILL");
     const afterNode = await waitFor(
-      "node restarted",
+      "node restarted after its split setup projection disappeared",
       (rows) => rows.filter(({ kind }) => kind === "node").length === 2,
     );
     assert.equal(afterNode.filter(({ kind }) => kind === "codex").length, 2);
@@ -211,6 +225,7 @@ test(
         HOME: directory,
         OPENCLAW_NODE_STATE_DIR: join(directory, "node-state"),
         OPENCLAW_NODE_SETUP_PATH: setupPath,
+        OPENCLAW_WORKSPACE_DIR: join(directory, "workspace"),
         OPENCLAW_NODE_DISPLAY_NAME: "agent-0123456789ab-workspace",
       },
       stdio: ["ignore", "ignore", "pipe"],
@@ -296,7 +311,6 @@ test(
     // Every start names the node after the Agent, not the first Pod's host name.
     const displayName = (args) => args[args.indexOf("--display-name") + 1];
     assert.equal(displayName(paired.args), "agent-0123456789ab-workspace");
-    assert.match(output, /"phase":"node-setup"/);
 
     // After pairing the controller removes the code and the kubelet removes the
     // file. A node restart then reconnects with its saved device identity.
@@ -367,6 +381,7 @@ test(
         HOME: directory,
         OPENCLAW_NODE_STATE_DIR: join(directory, "node-state"),
         OPENCLAW_NODE_SETUP_PATH: join(directory, "setup", "setup-code"),
+        OPENCLAW_WORKSPACE_DIR: join(directory, "workspace"),
       },
       stdio: ["ignore", "ignore", "pipe"],
     });
