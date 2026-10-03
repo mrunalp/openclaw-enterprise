@@ -375,6 +375,16 @@ func developmentRoutingProxyCIDRs(data []byte, podCIDR string) ([]string, error)
 	return trustedProxyCIDRs, nil
 }
 
+// OpenShell resolves a Sandbox's policy hostnames without cluster search
+// domains, so its workspace node needs the route's fully qualified Service name.
+// Other profiles keep the chart's default namespace-qualified name.
+func developmentRoutingHostname(state *developmentState) string {
+	if state.SandboxDriver != "openshell" {
+		return ""
+	}
+	return developmentGatewayServiceName(state.PlatformNamespace) + "." + developmentEnvoyNamespace + ".svc.cluster.local"
+}
+
 func developmentGatewayServiceName(namespace string) string {
 	digest := sha256.Sum256([]byte(namespace + "/" + developmentGatewayName))
 	return "occ-gateway-" + hex.EncodeToString(digest[:])[:12]

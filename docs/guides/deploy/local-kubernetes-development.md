@@ -116,7 +116,8 @@ export OCC_DEVELOPMENT_SANDBOX_DRIVER=openshell
 The checkout-local CLI creates one k3d cluster, then:
 
 1. installs the pinned Agent Sandbox controller and OpenShell
-   `v0.1.3-pre.2` assets;
+   `v0.1.3-pre.2` assets, then the pinned cert-manager and Envoy Gateway
+   controllers for private Agent Gateway routing;
 2. imports digest-resolved OpenShell, OCE controller, Agent runtime, and
    PostgreSQL images;
 3. creates `oce-system` and installs PostgreSQL, OpenShell Gateway, and the OCE
@@ -245,12 +246,12 @@ Verify directory search and gateway Socket Mode using the
 ## Verify the local boundary
 
 Startup prints the API URL, kubeconfig, Kubernetes context, and service-key file.
-With Sandbox Driver `none`, it also prints an HTTPS browser console URL and a
+The Kubernetes-only profile also prints an HTTPS browser console URL and a
 public browser CA. Import that CA as described in
 [Local Setup](../quickstart.md#open-the-platform-console). The browser session
 cookie uses a per-installation parent domain; its matching subdomains are part of
 the [shared session boundary](../../reference/agent-native-admin.md#shared-session-boundary).
-The OpenShell profile does not configure that browser endpoint.
+With OpenShell, Agent native admin stays disabled.
 
 Use the printed paths with other tools:
 
@@ -265,8 +266,8 @@ export OCC_SERVICE_KEY_FILE="<Service key file printed by scripts/dev-up>"
 
 In Kubernetes-only mode, a loopback k3d publication reaches a dedicated proxy
 selected by the OCE NetworkPolicy; the API remains ClusterIP. The worker uses
-in-cluster authentication. With OpenShell, the API and worker reach its Gateway
-through a narrow `oce-system` NetworkPolicy.
+in-cluster authentication. With OpenShell, the API, the worker, and dedicated
+Agent Gateways reach its Gateway through a narrow `oce-system` NetworkPolicy.
 
 The launcher sets `network.pluginStatusProxySourceCidrs` to the k3d node's Pod
 bridge address, the source the API server uses to proxy to Pods. That enables
