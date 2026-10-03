@@ -298,13 +298,18 @@ export async function localFirstAgentStack(context) {
     );
   }
   const [controller, kubernetes, browser] = await availablePorts();
-  const suffix = randomUUID().replaceAll("-", "").slice(0, 16);
+  // k3d rejects cluster names longer than 32 characters; the prefix below uses 20.
+  const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
   const directory = join(await realpath("/tmp"), "occ-first-agent-" + suffix);
+  // Dedicated Codex needs the Agent Gateway routing that only the Compose control plane
+  // installs alongside OpenShell; the Kubernetes-only profile rejects that revision.
+  const controlPlane = sandboxDriver === "openshell" ? "compose" : "kubernetes";
   const environment = {
     ...testEnvironment,
     COMPOSE_DISABLE_ENV_FILE: "1",
     OCC_DEVELOPMENT_COMPUTE_DRIVER: "kubernetes",
-    OCC_DEVELOPMENT_CONTROL_PLANE: "kubernetes",
+    OCC_DEVELOPMENT_CONTROL_PLANE: controlPlane,
+    OCC_DEVELOPMENT_COMPOSE_PROJECT: "occ_first_agent_" + suffix,
     OCC_DEVELOPMENT_SANDBOX_DRIVER: sandboxDriver,
     OCC_DEVELOPMENT_CONTAINER_ENGINE: "docker",
     OCC_DEVELOPMENT_STATE_DIRECTORY: directory,

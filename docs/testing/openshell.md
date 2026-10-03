@@ -218,10 +218,11 @@ root; bootstrap links the remaining runtime paths. The real test confirms that t
 identity can write the runtime home. The exposed route uses bearer
 passthrough: correct Gateway authentication upgrades, while missing and
 incorrect credentials fail. The real turn begins in the Gateway and executes in
-the OpenShell-owned Harness. The protected local first-Agent test also checks
-that the Gateway uses the advertised WebSocket origin, maps its exact hostname
-to the installed OpenShell Gateway Service, and leaves the direct Agent Service
-inactive.
+the OpenShell-owned Harness. The OpenShell lane also runs the protected local
+first-Agent test with `--harness codex` against its own Compose-plus-k3d stack.
+It checks that the Gateway uses the advertised WebSocket origin, maps its exact
+hostname to the installed OpenShell Gateway Service, and leaves the direct Agent
+Service inactive.
 
 For the exact Compose-plus-k3d startup, repeatable first-Agent command, current
 checkpoint, and symptom-based recovery notes, see

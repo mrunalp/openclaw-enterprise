@@ -220,16 +220,16 @@ async function readSecretResourceVersion({ stateDirectory, cluster, env, namespa
     "--context",
     `k3d-${cluster}`,
   ];
-  async function readOne(kind, selector, field, pattern, namespace) {
+  async function readOne(kind, selector, field, pattern) {
     let output;
     try {
       const { stdout } = await execFileAsync(
         "kubectl",
         [
           ...common,
-          ...(namespace === undefined ? [] : ["--namespace", namespace]),
           "get",
           kind,
+          "--all-namespaces",
           "--selector",
           selector,
           "--output",
@@ -249,18 +249,13 @@ async function readSecretResourceVersion({ stateDirectory, cluster, env, namespa
     return matches[0];
   }
 
-  const namespace = await readOne(
-    "namespaces",
-    `openclaw.dev/namespace=${namespaceId}`,
-    "name",
-    /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/,
-  );
+  // Compute materializes the Secret where its consumer runs: the execution namespace or,
+  // for a dedicated Gateway, the Agent's Gateway namespace. Its labels identify it in either.
   return readOne(
     "secrets",
     `openclaw.dev/namespace=${namespaceId},openclaw.dev/secret=${secretId}`,
     "resourceVersion",
     /^[A-Za-z0-9._:-]+$/,
-    namespace,
   );
 }
 
@@ -455,19 +450,24 @@ test(
     );
     if (selectedSandboxDriver === "openshell") {
       const kube = { stateDirectory, cluster: recorded.cluster, env };
-      const gateways = await readKubernetesJson(
+      const deployments = await readKubernetesJson(
         kube,
         [
           "get",
           "deployments",
           "--all-namespaces",
           "--selector",
-          `openclaw.dev/agent=${first.identity.agentId},openclaw.dev/workload-role=gateway`,
+          `openclaw.dev/agent=${first.identity.agentId}`,
         ],
         "the Agent Gateway",
       );
-      assert.equal(gateways.items.length, 1);
-      const gateway = gateways.items[0];
+      // Compute labels only the Pod template with its workload role, not the Deployment.
+      const gateways = deployments.items.filter(
+        (deployment) =>
+          deployment.spec.template.metadata.labels?.["openclaw.dev/workload-role"] === "gateway",
+      );
+      assert.equal(gateways.length, 1);
+      const gateway = gateways[0];
       const appServerUrl = gateway.spec.template.spec.containers[0].env.find(
         ({ name: variable }) => variable === "APP_SERVER_URL",
       )?.value;
