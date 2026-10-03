@@ -7870,9 +7870,15 @@ export class KubernetesComputeDriver implements ComputeDriver {
     namespace: KubernetesNamespaceAddress,
     gatewayUrl: string,
   ): string {
+    // An in-cluster route is the Envoy Service, which attributes the proxied node
+    // client. Another hostname may resolve only outside the cluster, so
+    // same-cluster OpenShell then uses the Gateway Service directly.
+    const hostname = this.options.gatewayRouting?.hostname;
     if (
       this.sandboxDriverForRevision(revision)?.implementation !== "openshell" ||
-      this.options.executionCluster !== undefined
+      this.options.executionCluster !== undefined ||
+      !hostname ||
+      /^[a-z0-9-]+\.[a-z0-9-]+\.svc(?:\.[a-z0-9.-]+)?$/.test(hostname)
     ) {
       return `${gatewayUrl}/node`;
     }

@@ -522,6 +522,7 @@ interface WorkspaceNodeBinding {
   readonly host: string;
   readonly port: number;
   readonly path: string;
+  readonly tls: boolean;
 }
 
 interface CodexRuntimeCredentialMaterial {
@@ -664,6 +665,7 @@ async function codexRuntimeCredentials(
       port:
         endpoint.port === "" ? (endpoint.protocol === "wss:" ? 443 : 80) : Number(endpoint.port),
       path: endpoint.pathname === "" ? "/" : endpoint.pathname,
+      tls: endpoint.protocol === "wss:",
     }),
   });
 }
@@ -1215,20 +1217,29 @@ function networkPolicies(options: OpenShellSandboxDriverOptions) {
 }
 
 function workspaceNodeNetworkPolicy(binding: WorkspaceNodeBinding): Record<string, unknown> {
+  // A wss endpoint stays end to end between the node and the Gateway route, which
+  // pins its own CA. OpenShell then enforces the binary, host, and port; the route
+  // enforces the path.
+  const endpoint = binding.tls
+    ? {
+        host: binding.host,
+        ports: [binding.port],
+        tls: "NETWORK_TLS_MODE_SKIP",
+        enforcement: "NETWORK_ENFORCEMENT_MODE_ENFORCE",
+      }
+    : {
+        host: binding.host,
+        ports: [binding.port],
+        protocol: "rest",
+        enforcement: "NETWORK_ENFORCEMENT_MODE_ENFORCE",
+        access: "NETWORK_ACCESS_PRESET_FULL",
+        path: binding.path,
+      };
   return {
     "workspace-node-enrollment": {
       name: "workspace-node-enrollment",
       binaries: [{ path: WORKSPACE_NODE_BINARY }],
-      endpoints: [
-        {
-          host: binding.host,
-          ports: [binding.port],
-          protocol: "rest",
-          enforcement: "NETWORK_ENFORCEMENT_MODE_ENFORCE",
-          access: "NETWORK_ACCESS_PRESET_FULL",
-          path: binding.path,
-        },
-      ],
+      endpoints: [endpoint],
     },
   };
 }

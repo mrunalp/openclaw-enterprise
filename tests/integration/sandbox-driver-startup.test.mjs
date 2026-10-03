@@ -845,6 +845,8 @@ test("OpenShell provisions dedicated Codex with bearer passthrough and provider 
       environmentVariable: "OPENCLAW_NODE_CA_PATH",
     },
   ]);
+  // A wss setup URL keeps TLS end to end to the Gateway route the node's CA pins;
+  // OpenShell must not terminate it, so the rule binds only binary, host, and port.
   assert.deepEqual(requests[0].spec.policy.network_policies["workspace-node-enrollment"], {
     name: "workspace-node-enrollment",
     binaries: [{ path: "/usr/local/bin/node" }],
@@ -852,10 +854,8 @@ test("OpenShell provisions dedicated Codex with bearer passthrough and provider 
       {
         host: "gateway.example.test",
         ports: [443],
-        protocol: "rest",
+        tls: "NETWORK_TLS_MODE_SKIP",
         enforcement: "NETWORK_ENFORCEMENT_MODE_ENFORCE",
-        access: "NETWORK_ACCESS_PRESET_FULL",
-        path: "/node",
       },
     ],
   });
