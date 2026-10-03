@@ -3447,10 +3447,15 @@ const processes = [
   { name: "Codex", args: ${JSON.stringify(["-e", ...nodeProgramArguments(AGENT_RUNTIME_ENTRYPOINT)])}, env: codexEnv },
 ];
 let stopping = false;
+// An OpenShell Sandbox reports EPERM for a group left with only zombies, as Darwin
+// does. Signal the child itself then; a supervisor crash would end node retries.
 function killGroup(child, signal) {
   if (!child?.pid) return;
   try { process.kill(-child.pid, signal); }
-  catch (error) { if (error.code !== "ESRCH") throw error; }
+  catch (error) {
+    if (error.code === "EPERM") child.kill(signal);
+    else if (error.code !== "ESRCH") throw error;
+  }
 }
 function start(slot) {
   if (stopping) return;
