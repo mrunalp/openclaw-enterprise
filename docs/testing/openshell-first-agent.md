@@ -65,6 +65,13 @@ pnpm cli:build
 bin/occ dev up
 ```
 
+To run the API, worker, and PostgreSQL in k3d instead, set
+`OCC_DEVELOPMENT_CONTROL_PLANE=kubernetes` and omit the Compose project. That
+profile prints `Deployment: Kubernetes only` and its API URL instead of
+`Control plane: Compose`; the same `first-agent.mjs` command applies. The
+protected tests `local-first-agent-openshell-real` and
+`local-first-agent-openshell-k3d-real` cover the two profiles.
+
 If Docker reports an overlapping network, select an unused private `/24` before
 retrying, for example:
 

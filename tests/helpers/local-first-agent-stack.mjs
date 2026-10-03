@@ -301,9 +301,14 @@ export async function localFirstAgentStack(context) {
   // k3d rejects cluster names longer than 32 characters; the prefix below uses 20.
   const suffix = randomUUID().replaceAll("-", "").slice(0, 12);
   const directory = join(await realpath("/tmp"), "occ-first-agent-" + suffix);
-  // Dedicated Codex needs the Agent Gateway routing that only the Compose control plane
-  // installs alongside OpenShell; the Kubernetes-only profile rejects that revision.
-  const controlPlane = sandboxDriver === "openshell" ? "compose" : "kubernetes";
+  // OpenShell proofs run against either development control plane; Compose remains its
+  // default because the first OpenShell first-Agent proof used it.
+  const controlPlane =
+    process.env.OCC_TEST_LOCAL_FIRST_AGENT_CONTROL_PLANE ??
+    (sandboxDriver === "openshell" ? "compose" : "kubernetes");
+  if (!["compose", "kubernetes"].includes(controlPlane)) {
+    throw new Error("OCC_TEST_LOCAL_FIRST_AGENT_CONTROL_PLANE must be compose or kubernetes.");
+  }
   const environment = {
     ...testEnvironment,
     COMPOSE_DISABLE_ENV_FILE: "1",

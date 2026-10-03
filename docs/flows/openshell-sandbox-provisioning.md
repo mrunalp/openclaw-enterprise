@@ -123,8 +123,9 @@ the pinned source archive, imports the digest-pinned OpenShell images, and
 records the resources it owns. The default Compose profile runs PostgreSQL and
 OCC in Compose while the worker targets k3d. The Kubernetes-only profile runs
 those components in `oce-system` and uses in-cluster authentication. Both
-profiles install the operator Workspace resources and restrict OpenShell
-Gateway, supervisor callback, API, and worker traffic to their exact peers. See
+profiles install private Envoy routing and the operator Workspace resources, and
+admit only the API, worker, supervisor callbacks, and dedicated Agent Gateways
+to the OpenShell Gateway. See
 the [local deployment guides](../guides/deploy/local-kubernetes-development.md)
 for startup, RBAC, image, and cleanup details.
 
@@ -258,12 +259,15 @@ revision cleanup deletes the Sandbox first.
 The runtime opens provider files through their reported absolute paths. Any
 Gateway failure prevents readiness.
 
-For private node routing, OpenShell's policy proxy opens the connection from its
-supervisor Pod rather than the Harness Pod. In the same cluster, Compute mints
-and observes setup through the private WSS route but embeds the Agent Gateway's
-cluster-local Service URL for the node. Paired policies admit supervisor egress
-and Gateway ingress only between that tenant's namespaces on the Gateway port;
-the Sandbox policy still binds the exact destination and calling binary.
+OpenShell's policy proxy opens the node connection from its supervisor Pod.
+When the route hostname is an in-cluster Service name, as in the Kubernetes-only
+profile's fully qualified one, the node uses that WSS route: Envoy attributes the
+client, and the Sandbox policy binds the node executable to the route's host and
+port without TLS inspection. Otherwise, as in Compose, the setup embeds the Agent
+Gateway's cluster-local Service URL, and paired policies admit only that tenant's
+supervisor-to-Gateway traffic. The supervisor relaunches an exited node until it
+connects; OpenShell reports `EPERM` for the node's process group, so the
+supervisor then signals the node directly.
 
 ### 5. Observe readiness or clean up
 

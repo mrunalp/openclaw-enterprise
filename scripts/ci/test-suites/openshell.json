@@ -18,9 +18,7 @@
     "OCC_TEST_DEV_UP_OPENSHELL_COMPOSE_REAL": "1",
     "OCC_TEST_DEV_UP_OPENSHELL_REAL": "1",
     "OCC_TEST_OPENSHELL_K3D_REAL": "1",
-    "OCC_TEST_LOCAL_FIRST_AGENT_REAL": "1",
-    "OCC_TEST_LOCAL_FIRST_AGENT_HARNESS": "codex",
-    "OCC_TEST_LOCAL_FIRST_AGENT_SANDBOX_DRIVER": "openshell"
+    "OCC_TEST_LOCAL_FIRST_AGENT_REAL": "1"
   },
   "prepare": {
     "postgres": true,
@@ -49,6 +47,12 @@
     },
     {
       "path": "tests/integration/local-first-agent-openshell-real.test.mjs",
+      "expectedTests": [
+        "a local Kubernetes installer can deploy and reuse an Agent but cannot replace its key after external changes"
+      ]
+    },
+    {
+      "path": "tests/integration/local-first-agent-openshell-k3d-real.test.mjs",
       "expectedTests": [
         "a local Kubernetes installer can deploy and reuse an Agent but cannot replace its key after external changes"
       ]

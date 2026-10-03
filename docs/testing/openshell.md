@@ -219,7 +219,8 @@ identity can write the runtime home. The exposed route uses bearer
 passthrough: correct Gateway authentication upgrades, while missing and
 incorrect credentials fail. The real turn begins in the Gateway and executes in
 the OpenShell-owned Harness. The OpenShell lane also runs the protected local
-first-Agent test with `--harness codex` against its own Compose-plus-k3d stack.
+first-Agent test with `--harness codex` twice, against its own Compose-plus-k3d
+stack and against its own Kubernetes-only stack.
 It checks that the Gateway uses the advertised WebSocket origin, maps its exact
 hostname to the installed OpenShell Gateway Service, and leaves the direct Agent
 Service inactive.
