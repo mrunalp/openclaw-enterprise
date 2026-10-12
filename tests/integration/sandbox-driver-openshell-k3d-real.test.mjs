@@ -11,7 +11,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { createRequire } from "node:module";
-import { connect } from "node:net";
+import { connect, isIPv4 } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
@@ -159,6 +159,41 @@ const {
   startGatewayPortForward,
 } = fixture;
 
+/**
+ * The Kubernetes API server's Pod proxy source, which Compute admits to each workload's private
+ * status port for deployment diagnostics and startup evidence. The lane runs one k3s server,
+ * whose API server reaches a local Pod over the cni0 bridge, so the source is that bridge's
+ * address, as `occ dev up` derives it. A configured lane value takes precedence.
+ */
+async function apiServerPodProxySourceCidrs() {
+  const configured = (process.env.OCC_TEST_KUBERNETES_PLUGIN_STATUS_PROXY_CIDRS ?? "")
+    .split(",")
+    .map((cidr) => cidr.trim())
+    .filter(Boolean);
+  if (configured.length > 0) {
+    return configured;
+  }
+  const nodes = JSON.parse(await kubectl("get", "nodes", "-o", "json")).items;
+  assert.equal(nodes.length, 1, "the OpenShell lane must run on one k3s server");
+  const [network] = String(nodes[0].spec?.podCIDR ?? "").split("/");
+  assert.ok(isIPv4(network), "the k3s server must have an IPv4 Pod CIDR");
+  // Any Pod address on the node routes through the bridge; skip the network and bridge
+  // addresses, which the kernel reports as local.
+  const octets = network.split(".").map(Number);
+  octets[3] += 2;
+  const { stdout } = await executeFile(process.env.OCC_DOCKER_BIN ?? "docker", [
+    "exec",
+    nodes[0].metadata.name,
+    "ip",
+    "route",
+    "get",
+    octets.join("."),
+  ]);
+  const source = /\bdev\s+cni0\b.*\bsrc\s+(\S+)/u.exec(stdout)?.[1];
+  assert.ok(isIPv4(source ?? ""), "the API server must reach local Pods over the cni0 bridge");
+  return [`${source}/32`];
+}
+
 async function createScopedController(context, identifier, platformNamespace, kubeconfig) {
   const suffix = hash(identifier);
   const account = "openclaw-production-controller";
@@ -219,7 +254,14 @@ async function createScopedController(context, identifier, platformNamespace, ku
             ],
             verbs: ["get", "list", "create", "patch", "delete"],
           },
-          { apiGroups: [""], resources: ["pods"], verbs: ["get", "list", "watch"] },
+          // As the chart's tenant worker role: a Pod annotation syncs a running Gateway's
+          // workspace node at once, and its private status port answers through the Pod proxy.
+          { apiGroups: [""], resources: ["pods"], verbs: ["get", "list", "watch", "patch"] },
+          { apiGroups: [""], resources: ["pods/proxy"], verbs: ["get"] },
+          // The API's Compute Driver also runs as this identity, so it takes the runtime log
+          // reads that the chart grants the API through its tenant API role.
+          { apiGroups: [""], resources: ["pods/log"], verbs: ["get"] },
+          { apiGroups: [""], resources: ["events"], verbs: ["get", "list"] },
           {
             apiGroups: [""],
             resources: ["persistentvolumeclaims"],
@@ -1506,11 +1548,17 @@ function createIntegrationSandboxDriverFactory(
     );
   }
 
-  async function endpointForNamespace(context, { sandboxServiceAccountName } = {}) {
+  async function endpointForNamespace(context, { sandboxServiceAccountName, exact = false } = {}) {
     const namespaceName = context.namespace.name;
     throwOpenShellAbortReason(context.signal);
     const prior = gatewayState.get(namespaceName);
     if (prior !== undefined && prior.sandboxServiceAccountName === sandboxServiceAccountName) {
+      return prior.endpoint;
+    }
+    // The gateway applies its one configured ServiceAccount to every Sandbox it creates. Once
+    // it runs an Agent's, a later Agent without a requested workload identity shares it, as on
+    // a deployed gateway; reinstalling would restart the gateway under the running Sandboxes.
+    if (!exact && prior?.sandboxServiceAccountName !== undefined) {
       return prior.endpoint;
     }
 
@@ -1658,6 +1706,7 @@ function createIntegrationSandboxDriverFactory(
             // identity Compute renders no identity, but the Agent ServiceAccount still exists.
             const endpoint = await endpointForNamespace(context, {
               sandboxServiceAccountName: agentSandboxServiceAccount(context),
+              exact: context.requirements.workloadIdentity !== undefined,
             });
             // The production Codex proof hands the real Driver exactly what Compute rendered;
             // unsupported shapes fail closed before OpenShell creates provider resources.
@@ -1688,6 +1737,7 @@ function createIntegrationSandboxDriverFactory(
           const requirements = bridgeRequirements(context, claimName, subPath);
           const endpoint = await endpointForNamespace(context, {
             sandboxServiceAccountName: context.requirements.workloadIdentity.serviceAccountName,
+            exact: true,
           });
           const provisioning = { ...context, requirements };
           return await delegate(
@@ -1724,6 +1774,7 @@ function createIntegrationSandboxDriverFactory(
             async harnessEndpoint(context) {
               const endpoint = await endpointForNamespace(context, {
                 sandboxServiceAccountName: agentSandboxServiceAccount(context),
+                exact: context.requirements.workloadIdentity !== undefined,
               });
               return await delegate(
                 context.requirements,
@@ -1736,6 +1787,7 @@ function createIntegrationSandboxDriverFactory(
             async harnessStatus(context) {
               const endpoint = await endpointForNamespace(context, {
                 sandboxServiceAccountName: agentSandboxServiceAccount(context),
+                exact: context.requirements.workloadIdentity !== undefined,
               });
               return await delegate(
                 context.requirements,
@@ -1743,6 +1795,16 @@ function createIntegrationSandboxDriverFactory(
                 endpoint,
                 context,
               ).harnessStatus(context);
+            },
+            // Compute admits the workspace-node connection only from the revision's
+            // supervisor Pod, which the real Driver labels from the gateway's Sandbox record.
+            async workspaceNodePeerLabels(context) {
+              const endpoint = existingEndpointForNamespace(context);
+              return await delegate(
+                undefined,
+                context.namespace.name,
+                endpoint,
+              ).workspaceNodePeerLabels(context);
             },
           }),
       async cleanup(context) {
@@ -1944,6 +2006,12 @@ async function prepareProductionInstallation(
     openShellRuntimeClass,
     cluster: "k3d-openshell-sandboxdriver",
   });
+  // The Codex scenario runs a second Agent beside the first. Each Agent holds about 7 GiB of
+  // limits: its 4 GiB Gateway, its Harness and the 1 GiB OpenShell supervisor. A rolling
+  // replacement of a Gateway briefly holds another 4 GiB.
+  configuration.drivers.compute.configuration.resources.namespace.quota["limits.memory"] = "20Gi";
+  configuration.drivers.compute.configuration.network.pluginStatusProxySourceCidrs =
+    await apiServerPodProxySourceCidrs();
   if (harnessId === "openclaw") {
     // scripts/k3d builds this runtime from an OpenClaw source with native worker support.
     configuration.runtime = { nativeWorkerSupport: "custom-image" };
@@ -2551,6 +2619,15 @@ async function prepareProductionInstallation(
     observerPool,
     pauseWorker,
     resumeWorker: startWorker,
+    provisioningFailure: (revisionId) => createSandboxDriver.provisioningFailures.get(revisionId),
+    diagnoseAgentRevision: (agentId, revisionId) =>
+      writeWorkerCompletionDiagnostics({
+        pool: observerPool,
+        events,
+        namespaceId,
+        agentId,
+        revisionId,
+      }),
     diagnoseRevision: (revisionId) =>
       writeWorkerCompletionDiagnostics({
         pool: observerPool,
@@ -3112,6 +3189,60 @@ async function assertRefreshCredentialSources(topology) {
   );
 }
 
+/** Reports why another Agent's revision did not activate, before the fixture removes it. */
+async function diagnoseAdditionalAgent(topology, agentId, revisionId, deploymentPath) {
+  const secrets = failureSecrets([
+    process.env,
+    Object.fromEntries(
+      (topology.toolSources ?? []).map(({ token }, index) => [`TOOL_TOKEN_${index}`, token]),
+    ),
+  ]);
+  const write = (label, value) =>
+    process.stderr.write(
+      `OpenShell second Agent ${label}: ${redactLogLine(JSON.stringify(value), secrets, 4000)}\n`,
+    );
+  await topology.diagnoseAgentRevision(agentId, revisionId);
+  const failure = topology.provisioningFailure(revisionId);
+  if (failure !== undefined) {
+    write("provisioning failure", failure.message);
+  }
+  const status = await topology.request("GET", deploymentPath).catch((error) => error);
+  write("deployment", status?.data ?? status?.error ?? String(status));
+  for (const namespace of new Set([topology.placement, topology.gatewayPlacement])) {
+    const pods = await resources("pods", namespace).catch(() => []);
+    for (const pod of pods.filter(
+      ({ metadata }) => metadata.labels?.["openclaw.dev/agent"] === agentId,
+    )) {
+      write(`Pod ${pod.metadata.name}`, {
+        phase: pod.status?.phase,
+        conditions: pod.status?.conditions?.map(({ type, status: value, reason }) => ({
+          type,
+          value,
+          reason,
+        })),
+        containers: pod.status?.containerStatuses?.map(({ name, ready, restartCount, state }) => ({
+          name,
+          ready,
+          restartCount,
+          state,
+        })),
+      });
+    }
+    const events = await resources("events", namespace).catch(() => []);
+    write(
+      `${namespace} warning events`,
+      events
+        .filter(({ type }) => type === "Warning")
+        .slice(-15)
+        .map(({ involvedObject, reason, message }) => ({
+          object: involvedObject?.name,
+          reason,
+          message,
+        })),
+    );
+  }
+}
+
 /**
  * Deploys another dedicated Codex Agent in the same Namespace through the regular API, with
  * the first Agent's configuration and model source plus the given tool sources. Its principal
@@ -3147,11 +3278,27 @@ async function deployAdditionalCredentialAgent(topology, toolSources) {
   }
   const deployed = await request("POST", `${agentPath}/deploy`);
   assert.equal(deployed.status, 202, JSON.stringify(deployed.error));
-  await waitFor(`second Agent revision ${deployed.data.id} activation`, async () => {
-    const observed = await request("GET", agentPath);
-    assert.equal(observed.status, 200, JSON.stringify(observed.error));
-    return observed.data.activeRevisionId === deployed.data.id ? true : undefined;
-  });
+  const deploymentPath = `${agentPath}/deployments/${deployed.data.id}`;
+  try {
+    await waitFor(
+      `second Agent revision ${deployed.data.id} activation`,
+      async () => {
+        const observed = await request("GET", agentPath);
+        assert.equal(observed.status, 200, JSON.stringify(observed.error));
+        if (observed.data.activeRevisionId === deployed.data.id) {
+          return true;
+        }
+        const status = await request("GET", deploymentPath);
+        assert.equal(status.status, 200, JSON.stringify(status.error));
+        assert.notEqual(status.data.status, "failed", JSON.stringify(status.data));
+        return undefined;
+      },
+      300_000,
+    );
+  } catch (error) {
+    await diagnoseAdditionalAgent(topology, agent.data.id, deployed.data.id, deploymentPath);
+    throw error;
+  }
   await waitForProviderHarnessPod(topology.placement, deployed.data);
   return { agent: agent.data, revision: deployed.data, path: agentPath };
 }
@@ -4130,16 +4277,10 @@ async function assertEmbeddedOpenShellFailsClosed(topology) {
     credentialSources: [{ sourceId: topology.agent.harnessAuth.sourceId }],
     harnessAuth: topology.agent.harnessAuth,
   });
-  assert.equal(agent.status, 201, JSON.stringify(agent.error));
-  const deployed = await topology.request(
-    "POST",
-    `/namespaces/${topology.namespaceId}/agents/${agent.data.id}/deploy`,
-  );
-  assert.equal(
-    deployed.status,
-    404,
-    "OpenShell-selected installations must reject embedded Agents before provisioning.",
-  );
+  // OpenShell-selected installations refuse an embedded Agent when it is saved, so nothing
+  // can be deployed or provisioned for it.
+  assert.equal(agent.status, 400, JSON.stringify(agent.data ?? agent.error));
+  assert.match(agent.error.message, /supports only dedicated Harness execution/u);
 }
 
 async function observeExposedCodexAuthenticationBoundary(serviceUrl, appServerToken) {
