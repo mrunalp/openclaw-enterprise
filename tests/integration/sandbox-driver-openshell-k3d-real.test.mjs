@@ -2541,6 +2541,8 @@ async function prepareProductionInstallation(
     gatewayPod: gatewayPods[0],
     harnessServiceUrl: createSandboxDriver.harnessServiceUrls.get(deployed.data.id),
     appServerToken: transport.appServerToken,
+    modelSecretId: modelSecret.data.id,
+    sourceRoleId: sourceRole.data.id,
     controllerUrl,
     credentials: adminCredentials,
     ...(toolSources === undefined ? {} : { toolSources }),
@@ -2642,12 +2644,12 @@ async function startTokenEcho(context, issuerJwks) {
 }
 
 // A redeploy rolls the Agent Gateway Deployment, so later turns use the Pod running now.
-async function currentGatewayPod(topology) {
+async function currentGatewayPod(topology, agentId = topology.agent.id) {
   return await waitFor("one running Agent Gateway Pod", async () => {
     const pods = (await resources("pods", topology.gatewayPlacement)).filter(
       (pod) =>
         pod.metadata.labels?.["openclaw.dev/workload-role"] === "gateway" &&
-        pod.metadata.labels?.["openclaw.dev/agent"] === topology.agent.id &&
+        pod.metadata.labels?.["openclaw.dev/agent"] === agentId &&
         pod.metadata.deletionTimestamp === undefined &&
         pod.status?.phase === "Running",
     );
@@ -3111,10 +3113,55 @@ async function assertRefreshCredentialSources(topology) {
 }
 
 /**
+ * Deploys another dedicated Codex Agent in the same Namespace through the regular API, with
+ * the first Agent's configuration and model source plus the given tool sources. Its principal
+ * receives `operate` on exactly those sources, as the first Agent's does.
+ */
+async function deployAdditionalCredentialAgent(topology, toolSources) {
+  const { request, namespaceId } = topology;
+  const modelSourceId = topology.agent.harnessAuth.sourceId;
+  assert.equal(typeof topology.agent.configurationId, "string");
+  const agent = await request("POST", `/namespaces/${namespaceId}/agents`, {
+    name: `openshell-second-${randomUUID()}`,
+    configurationId: topology.agent.configurationId,
+    executionMode: "dedicated",
+    harnessAuth: topology.agent.harnessAuth,
+    credentialSources: [
+      { sourceId: modelSourceId },
+      ...toolSources.map(({ id }) => ({ sourceId: id })),
+    ],
+  });
+  assert.equal(agent.status, 201, JSON.stringify(agent.error));
+  const agentPath = `/namespaces/${namespaceId}/agents/${agent.data.id}`;
+  const runtimeCredentials = await request("POST", `${agentPath}/runtime-credentials`, {});
+  assert.equal(runtimeCredentials.status, 200, JSON.stringify(runtimeCredentials.error));
+  for (const sourceId of [modelSourceId, ...toolSources.map(({ id }) => id)]) {
+    const binding = await request("POST", `/namespaces/${namespaceId}/iam/access-bindings`, {
+      subjectKind: "identity",
+      subjectId: agent.data.servicePrincipalId,
+      roleId: topology.sourceRoleId,
+      resourceKind: "credential_source",
+      resourceId: sourceId,
+    });
+    assert.equal(binding.status, 201, JSON.stringify(binding.error));
+  }
+  const deployed = await request("POST", `${agentPath}/deploy`);
+  assert.equal(deployed.status, 202, JSON.stringify(deployed.error));
+  await waitFor(`second Agent revision ${deployed.data.id} activation`, async () => {
+    const observed = await request("GET", agentPath);
+    assert.equal(observed.status, 200, JSON.stringify(observed.error));
+    return observed.data.activeRevisionId === deployed.data.id ? true : undefined;
+  });
+  await waitForProviderHarnessPod(topology.placement, deployed.data);
+  return { agent: agent.data, revision: deployed.data, path: agentPath };
+}
+
+/**
  * The running Codex Harness calls the echo service with each tool placeholder. OpenShell
  * substitutes a token only at its own source's endpoint. The phase then proves, through the
  * real worker, Compute and OpenShell gateway, that:
  * - a withdrawal is executed only on its own requester's authority, even on a shared claim;
+ * - withdrawing a source from one Agent leaves another Agent's attachment of it in place;
  * - an Agent that loses a source grant after admission never has the revision provisioned;
  * - admission refuses a redeploy without the grant.
  * The model source keeps working throughout.
@@ -3130,11 +3177,11 @@ async function assertNonModelCredentialSource(topology) {
   await waitForProviderHarnessPod(topology.placement, revision);
   // The dedicated Harness holds only the app-server token's digest, so each turn goes through the
   // Agent Gateway.
-  const call = async () => {
+  const call = async (callerId = agentId) => {
     const nonce = `OCC-OPENSHELL-TOOL-${randomUUID()}`;
     const result = await requestCodexTurnFromGatewayPod({
       namespace: topology.gatewayPlacement,
-      gatewayPod: await currentGatewayPod(topology),
+      gatewayPod: await currentGatewayPod(topology, callerId),
       providerModel,
       prompt:
         `Use the shell exec tool. Run each numbered command in a separate exec tool ` +
@@ -3187,6 +3234,14 @@ async function assertNonModelCredentialSource(topology) {
   assert.equal(before.placeholder, "openshell");
   assert.equal(before.a, toolA.digest, "OpenShell must substitute tool A's token");
   assert.equal(before.b, toolB.digest, "OpenShell must substitute tool B's token");
+
+  // A second Agent attaches tool A only. OpenShell gives it tool A's token, and tool B's
+  // endpoint receives no token from it, because only attached sources are substituted.
+  const second = await deployAdditionalCredentialAgent(topology, [toolA]);
+  const secondBefore = await call(second.agent.id);
+  assert.equal(secondBefore.placeholder, "openshell");
+  assert.equal(secondBefore.a, toolA.digest, "the second Agent must receive tool A's token");
+  assert.notEqual(secondBefore.b, toolB.digest, "an unattached source must not be delivered");
 
   // Two requesters withdraw different sources from the running revision, sharing one worker
   // claim. The second, operator B, held the actor's grants when the withdrawal was recorded
@@ -3251,6 +3306,35 @@ async function assertNonModelCredentialSource(topology) {
   assert.equal(after.b, toolB.digest, "a denied withdrawal must not detach its source");
   const unchanged = await request("GET", `/namespaces/${namespaceId}/agents/${agentId}`);
   assert.equal(unchanged.data.activeRevisionId, revision.id, "withdrawal must not redeploy");
+  // The withdrawal detaches tool A from the first Agent's Sandbox only. The provider and the
+  // second Agent's attachment stay, so its running Harness still receives the token.
+  const secondAfter = await call(second.agent.id);
+  assert.equal(
+    secondAfter.a,
+    toolA.digest,
+    "another Agent's withdrawal must not detach the source from this Agent",
+  );
+  const secondWithdrawal = await request(
+    "GET",
+    `${second.path}/credential-sources/${toolA.id}/withdrawal`,
+  );
+  assert.equal(secondWithdrawal.status, 404, JSON.stringify(secondWithdrawal.data));
+
+  // Stop the second Agent through OCC so the later phases run with one Harness, as before.
+  const stopped = await request("POST", `${second.path}/stop`);
+  assert.equal(stopped.status, 202, JSON.stringify(stopped.error));
+  await waitFor(
+    "the worker to remove the stopped second Agent's Sandbox",
+    async () => {
+      const sandboxes = await resources("sandboxes.agents.x-k8s.io", topology.placement);
+      return sandboxes.some(
+        (sandbox) => sandbox.metadata.labels?.["openclaw.dev/revision"] === second.revision.id,
+      )
+        ? undefined
+        : true;
+    },
+    180_000,
+  );
 
   // Admission accepts a redeploy, then the Agent principal loses its grant on tool B before
   // the worker dispatches it. The worker must refuse before Compute provisions anything, so
@@ -3306,6 +3390,202 @@ async function assertNonModelCredentialSource(topology) {
     revisionsBefore,
     "a refused deployment must not admit a revision",
   );
+}
+
+// Characters of the credentials this suite scans for: base64, base64url and JWT.
+const CREDENTIAL_ALPHABET = /^[A-Za-z0-9._~+/=-]+$/u;
+
+/**
+ * Scans every regular file under the given Harness paths for the credentials, in the Pod.
+ * Only each credential's length and digest cross into the Pod, and only counts come back,
+ * so neither the command line nor a failure can expose a credential.
+ */
+async function scanHarnessFilesForCredentials(namespace, pod, roots, credentials) {
+  // A boolean, so a failure report cannot carry the credential.
+  assert.ok(
+    credentials.every((credential) => CREDENTIAL_ALPHABET.test(credential)),
+    "every scanned credential must fit the scanned alphabet",
+  );
+  const needles = credentials.map((credential) => ({
+    length: credential.length,
+    digest: createHash("sha256").update(credential).digest("hex"),
+  }));
+  const script = [
+    'const fs = require("node:fs");',
+    'const path = require("node:path");',
+    'const { createHash } = require("node:crypto");',
+    "const needles = JSON.parse(process.argv[1]);",
+    "const roots = JSON.parse(process.argv[2]);",
+    "const byLength = new Map();",
+    "for (const { length, digest } of needles) {",
+    "  byLength.set(length, (byLength.get(length) ?? new Set()).add(digest));",
+    "}",
+    "const shortest = Math.min(...byLength.keys());",
+    "let files = 0, bytes = 0, matches = 0;",
+    "const scan = (text) => {",
+    "  for (const [run] of text.matchAll(/[A-Za-z0-9._~+\\/=-]+/g)) {",
+    "    if (run.length < shortest) continue;",
+    "    for (const [length, digests] of byLength) {",
+    "      for (let start = 0; start + length <= run.length; start += 1) {",
+    "        const window = run.slice(start, start + length);",
+    '        if (digests.has(createHash("sha256").update(window).digest("hex"))) matches += 1;',
+    "      }",
+    "    }",
+    "  }",
+    "};",
+    "const walk = (entry) => {",
+    "  let stat;",
+    "  try { stat = fs.lstatSync(entry); } catch { return; }",
+    "  if (stat.isDirectory()) {",
+    "    for (const child of fs.readdirSync(entry)) walk(path.join(entry, child));",
+    "  } else if (stat.isFile()) {",
+    "    files += 1;",
+    "    bytes += stat.size;",
+    '    scan(fs.readFileSync(entry, "latin1"));',
+    "  }",
+    "};",
+    "for (const root of roots) walk(root);",
+    "process.stdout.write(JSON.stringify({ files, bytes, matches }));",
+  ].join("\n");
+  return JSON.parse(
+    await kubectl(
+      "exec",
+      pod.metadata.name,
+      "--namespace",
+      namespace,
+      "--container",
+      "agent",
+      "--",
+      "node",
+      "-e",
+      script,
+      JSON.stringify(needles),
+      JSON.stringify(roots),
+    ),
+  );
+}
+
+/**
+ * After the model and tool turns, checks the Agent-visible material and the operator-facing
+ * records for the upstream credentials and the OpenShell placeholders:
+ * - no Pod of the Agent mounts or references the source's stored OCC Secret;
+ * - the Pod specs, the Agent- and revision-owned Secrets and the workspace files hold no
+ *   upstream credential; the stored OCC Secrets are excluded, since they hold it by design;
+ * - deployment diagnostics, runtime status, runtime logs and audit events hold neither an
+ *   upstream credential nor a placeholder, which is itself a usable capability.
+ */
+async function assertAgentVisibleMaterialExcludesCredentials(topology) {
+  const { request, namespaceId, placement, gatewayPlacement, observerPool } = topology;
+  const agentId = topology.agent.id;
+  const credentials = [
+    process.env.OPENAI_API_KEY,
+    ...(topology.toolSources ?? []).map(({ token }) => token),
+    ...(topology.keycloak === undefined ? [] : [topology.keycloak.clientSecret]),
+  ];
+  const placeholderPrefix = "openshell:resolve:";
+  const holdsCredential = (text) => credentials.some((credential) => text.includes(credential));
+  const namespaces = [...new Set([placement, gatewayPlacement])];
+  const listed = async (kind) =>
+    (await Promise.all(namespaces.map((namespace) => resources(kind, namespace)))).flat();
+
+  // The stored OCC Secret holds the model key by design; no Pod of the Agent may mount it,
+  // take an environment value from it, or name it at all.
+  const secrets = await listed("secrets");
+  const stored = secrets.filter(({ metadata }) => metadata.labels?.["openclaw.dev/secret"]);
+  const modelSecret = stored.filter(
+    ({ metadata }) => metadata.labels["openclaw.dev/secret"] === topology.modelSecretId,
+  );
+  assert.equal(modelSecret.length, 1, "the model source's stored OCC Secret must be found");
+  const current = await request("GET", `/namespaces/${namespaceId}/agents/${agentId}`);
+  assert.equal(current.status, 200, JSON.stringify(current.error));
+  const revisionId = current.data.activeRevisionId;
+  const harnessPod = await waitForProviderHarnessPod(placement, { id: revisionId, agentId });
+  const agentPods = (await listed("pods")).filter(
+    ({ metadata }) => metadata.labels?.["openclaw.dev/agent"] === agentId,
+  );
+  assert.ok(
+    agentPods.some(({ metadata }) => metadata.uid === harnessPod.metadata.uid),
+    "the scan must include the running Harness Pod",
+  );
+  for (const pod of agentPods) {
+    const spec = JSON.stringify(pod.spec);
+    for (const { metadata } of stored) {
+      assert.equal(
+        spec.includes(metadata.name),
+        false,
+        `Pod ${pod.metadata.name} must not mount or reference a stored OCC Secret`,
+      );
+    }
+    assert.equal(holdsCredential(JSON.stringify(pod)), false, "no Pod may hold a credential");
+  }
+
+  // Every other Secret in the Agent's namespaces, including the Agent-owned transport Secret
+  // and revision-owned Secrets, must hold no upstream credential. Helm release records are
+  // OpenShell's installation, compressed, and owned by no Agent.
+  const transportName = `openclaw-agent-transport-${hash(agentId)}`;
+  const scanned = secrets.filter(
+    ({ metadata }) =>
+      metadata.labels?.["openclaw.dev/secret"] === undefined && metadata.labels?.owner !== "helm",
+  );
+  assert.ok(
+    scanned.some(({ metadata }) => metadata.name === transportName),
+    "the scan must include the Agent's transport Secret",
+  );
+  for (const secret of scanned) {
+    const decoded = Object.values(secret.data ?? {})
+      .map((value) => Buffer.from(value, "base64").toString("utf8"))
+      .join("\n");
+    assert.equal(
+      holdsCredential(decoded) || holdsCredential(JSON.stringify(secret.metadata)),
+      false,
+      `Secret ${secret.metadata.name} must not hold an upstream credential`,
+    );
+  }
+
+  // The turns above wrote Codex sessions to the workspace PVC; the PVC holds no credential.
+  const container = harnessPod.spec.containers.find(({ name }) => name === "agent");
+  const claims = new Set(
+    (harnessPod.spec.volumes ?? [])
+      .filter(({ persistentVolumeClaim }) => persistentVolumeClaim?.claimName)
+      .map(({ name }) => name),
+  );
+  const roots = (container.volumeMounts ?? [])
+    .filter(({ name }) => claims.has(name))
+    .map(({ mountPath }) => mountPath);
+  assert.ok(roots.length > 0, "the Harness must mount its workspace PVC");
+  const files = await scanHarnessFilesForCredentials(placement, harnessPod, roots, credentials);
+  assert.ok(files.files > 0, "the workspace must hold the Harness's session files");
+  assert.equal(files.matches, 0, "no workspace file may hold an upstream credential");
+
+  // Operator-facing diagnostics and logs of the active revision.
+  const revisionPath = `/namespaces/${namespaceId}/agents/${agentId}/deployments/${revisionId}`;
+  const diagnostics = await request("POST", `${revisionPath}/diagnostics`);
+  assert.equal(diagnostics.status, 200, JSON.stringify(diagnostics.error));
+  const runtime = await request("GET", `${revisionPath}/runtime`);
+  assert.equal(runtime.status, 200, JSON.stringify(runtime.error));
+  const observed = [
+    ["deployment diagnostics", diagnostics],
+    ["runtime status", runtime],
+  ];
+  const sources = runtime.data.sources.filter(({ available }) => available);
+  assert.ok(sources.length > 0, "the revision must have a readable log source");
+  for (const { id } of sources) {
+    const logs = await request("GET", `${revisionPath}/runtime/logs?source=${id}&tailLines=1000`);
+    assert.equal(logs.status, 200, JSON.stringify(logs.error));
+    observed.push([`${id} runtime logs`, logs]);
+  }
+  // Audit evidence for the whole Namespace, including registration, update and withdrawal.
+  const audit = await observerPool.query(
+    "SELECT row_to_json(event)::text AS event FROM occ.audit_events event WHERE namespace_id = $1",
+    [namespaceId],
+  );
+  assert.ok(audit.rowCount > 0, "the Namespace must have audit evidence");
+  observed.push(["audit events", audit.rows.map(({ event }) => event)]);
+  for (const [label, value] of observed) {
+    const text = JSON.stringify(value);
+    assert.equal(holdsCredential(text), false, `${label} must not hold an upstream credential`);
+    assert.equal(text.includes(placeholderPrefix), false, `${label} must not hold a placeholder`);
+  }
 }
 
 /**
@@ -4015,7 +4295,11 @@ test(
       );
       await assertNonModelCredentialSource(topology);
       process.stderr.write(
-        "OpenShell integration: non-model source verified; testing credential source update and live withdrawal.\n",
+        "OpenShell integration: non-model source verified; checking Agent-visible material, diagnostics and audit.\n",
+      );
+      await assertAgentVisibleMaterialExcludesCredentials(topology);
+      process.stderr.write(
+        "OpenShell integration: credential absence verified; testing credential source update and live withdrawal.\n",
       );
       await assertCredentialSourceUpdateAndLiveWithdrawal(topology);
       process.stderr.write(
