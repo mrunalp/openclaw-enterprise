@@ -3466,6 +3466,21 @@ async function assertNonModelCredentialSource(topology) {
     `${second.path}/credential-sources/${toolA.id}/withdrawal`,
   );
   assert.equal(secondWithdrawal.status, 404, JSON.stringify(secondWithdrawal.data));
+  // Whether each echo endpoint received the source's real token; digests compared, never shown.
+  const delivered = (observedCall) => ({
+    toolA: observedCall.a === toolA.digest,
+    toolB: observedCall.b === toolB.digest,
+  });
+  process.stderr.write(
+    `OpenShell integration: tool token delivery ${JSON.stringify({
+      firstAgent: { beforeWithdrawal: delivered(before), afterWithdrawal: delivered(after) },
+      secondAgent: {
+        beforeWithdrawal: delivered(secondBefore),
+        afterWithdrawal: delivered(secondAfter),
+      },
+      withdrawals: { firstAgentToolA: revokedA.state, secondAgentToolA: "none" },
+    })}.\n`,
+  );
 
   // Stop the second Agent through OCC so the later phases run with one Harness, as before.
   const stopped = await request("POST", `${second.path}/stop`);
@@ -3539,63 +3554,39 @@ async function assertNonModelCredentialSource(topology) {
   );
 }
 
-// Characters of the credentials this suite scans for: base64, base64url and JWT.
-const CREDENTIAL_ALPHABET = /^[A-Za-z0-9._~+/=-]+$/u;
+// Bounds the Harness file stream; the workspace holds session files, not bulk data.
+const HARNESS_FILE_STREAM_MAX_BYTES = 256 * 1024 * 1024;
 
 /**
- * Scans every regular file under the given Harness paths for the credentials, in the Pod.
- * Only each credential's length and digest cross into the Pod, and only counts come back,
- * so neither the command line nor a failure can expose a credential.
+ * Streams every regular file under the given Harness paths out of the Pod. The scan runs in
+ * the test, so nothing derived from a credential enters the Pod. Each file is framed by a
+ * JSON line with its path and size.
  */
-async function scanHarnessFilesForCredentials(namespace, pod, roots, credentials) {
-  // A boolean, so a failure report cannot carry the credential.
-  assert.ok(
-    credentials.every((credential) => CREDENTIAL_ALPHABET.test(credential)),
-    "every scanned credential must fit the scanned alphabet",
-  );
-  const needles = credentials.map((credential) => ({
-    length: credential.length,
-    digest: createHash("sha256").update(credential).digest("hex"),
-  }));
+async function readHarnessFiles(namespace, pod, roots) {
   const script = [
     'const fs = require("node:fs");',
     'const path = require("node:path");',
-    'const { createHash } = require("node:crypto");',
-    "const needles = JSON.parse(process.argv[1]);",
-    "const roots = JSON.parse(process.argv[2]);",
-    "const byLength = new Map();",
-    "for (const { length, digest } of needles) {",
-    "  byLength.set(length, (byLength.get(length) ?? new Set()).add(digest));",
-    "}",
-    "const shortest = Math.min(...byLength.keys());",
-    "let files = 0, bytes = 0, matches = 0;",
-    "const scan = (text) => {",
-    "  for (const [run] of text.matchAll(/[A-Za-z0-9._~+\\/=-]+/g)) {",
-    "    if (run.length < shortest) continue;",
-    "    for (const [length, digests] of byLength) {",
-    "      for (let start = 0; start + length <= run.length; start += 1) {",
-    "        const window = run.slice(start, start + length);",
-    '        if (digests.has(createHash("sha256").update(window).digest("hex"))) matches += 1;',
-    "      }",
-    "    }",
-    "  }",
-    "};",
     "const walk = (entry) => {",
     "  let stat;",
     "  try { stat = fs.lstatSync(entry); } catch { return; }",
     "  if (stat.isDirectory()) {",
     "    for (const child of fs.readdirSync(entry)) walk(path.join(entry, child));",
     "  } else if (stat.isFile()) {",
-    "    files += 1;",
-    "    bytes += stat.size;",
-    '    scan(fs.readFileSync(entry, "latin1"));',
+    "    let content;",
+    "    try { content = fs.readFileSync(entry); } catch { return; }",
+    '    process.stdout.write(JSON.stringify({ path: entry, size: content.length }) + "\\n");',
+    "    process.stdout.write(content);",
     "  }",
     "};",
-    "for (const root of roots) walk(root);",
-    "process.stdout.write(JSON.stringify({ files, bytes, matches }));",
+    "for (const root of JSON.parse(process.argv[1])) walk(root);",
   ].join("\n");
-  return JSON.parse(
-    await kubectl(
+  const { stdout } = await executeFile(
+    "kubectl",
+    [
+      "--kubeconfig",
+      kubeconfigPath,
+      "--context",
+      kubernetesContext,
       "exec",
       pod.metadata.name,
       "--namespace",
@@ -3606,10 +3597,19 @@ async function scanHarnessFilesForCredentials(namespace, pod, roots, credentials
       "node",
       "-e",
       script,
-      JSON.stringify(needles),
       JSON.stringify(roots),
-    ),
+    ],
+    { encoding: "buffer", maxBuffer: HARNESS_FILE_STREAM_MAX_BYTES },
   );
+  const files = [];
+  for (let offset = 0; offset < stdout.length;) {
+    const end = stdout.indexOf(0x0a, offset);
+    assert.ok(end > offset, "the Harness file stream must frame every file");
+    const { path, size } = JSON.parse(stdout.subarray(offset, end).toString("utf8"));
+    files.push({ path, content: stdout.subarray(end + 1, end + 1 + size) });
+    offset = end + 1 + size;
+  }
+  return files;
 }
 
 /**
@@ -3700,9 +3700,16 @@ async function assertAgentVisibleMaterialExcludesCredentials(topology) {
     .filter(({ name }) => claims.has(name))
     .map(({ mountPath }) => mountPath);
   assert.ok(roots.length > 0, "the Harness must mount its workspace PVC");
-  const files = await scanHarnessFilesForCredentials(placement, harnessPod, roots, credentials);
-  assert.ok(files.files > 0, "the workspace must hold the Harness's session files");
-  assert.equal(files.matches, 0, "no workspace file may hold an upstream credential");
+  const files = await readHarnessFiles(placement, harnessPod, roots);
+  assert.ok(files.length > 0, "the workspace must hold the Harness's session files");
+  // Only file paths are reported, never content.
+  assert.deepEqual(
+    files
+      .filter(({ content }) => credentials.some((credential) => content.includes(credential)))
+      .map(({ path }) => path),
+    [],
+    "no workspace file may hold an upstream credential",
+  );
 
   // Operator-facing diagnostics and logs of the active revision.
   const revisionPath = `/namespaces/${namespaceId}/agents/${agentId}/deployments/${revisionId}`;
@@ -3733,6 +3740,20 @@ async function assertAgentVisibleMaterialExcludesCredentials(topology) {
     assert.equal(holdsCredential(text), false, `${label} must not hold an upstream credential`);
     assert.equal(text.includes(placeholderPrefix), false, `${label} must not hold a placeholder`);
   }
+  // Counts only, for the run record.
+  process.stderr.write(
+    `OpenShell integration: credential absence scanned ${JSON.stringify({
+      credentials: credentials.length,
+      pods: agentPods.length,
+      storedSecretsExcluded: stored.length,
+      secrets: scanned.length,
+      workspaceFiles: files.length,
+      workspaceBytes: files.reduce((total, { content }) => total + content.length, 0),
+      logSources: sources.map(({ id }) => id),
+      auditEvents: audit.rowCount,
+      matches: 0,
+    })}.\n`,
+  );
 }
 
 /**
