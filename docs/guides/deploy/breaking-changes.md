@@ -11,13 +11,13 @@ then follow the [upgrade checklist](upgrade-checklist.md) and
 Entries are newest first. Steps marked _untested_ have not been run against a
 real Installation.
 
-## 2026-10-12: OpenShell `openai` credential sources need registering again
+## 2026-10-12: OpenShell `openai` credential sources need replacing
 
 **What breaks.** Each OpenShell credential source now owns its provider profile.
 An `openai` source registered by an earlier build points its provider at the
 shared `oce-openai` profile, so OCC no longer treats that provider as the
-source's. Deployments that list the source fail, and deleting it through OCC
-leaves it `deleting`.
+source's. A deployment that lists the source fails. Deleting the source through
+OCC leaves it `deleting` until its provider is removed by hand.
 
 **Who is affected.** Installations with OpenShell `openai` credential sources.
 `bearer-token` and OAuth2 sources already owned their profiles and are
@@ -26,13 +26,25 @@ unaffected.
 **How to tell.** The source's `status` is `failed`, with "The OpenShell
 provider is not owned by this source."
 
-**Steps.** Before upgrading, remove each such source from its Agents and delete
-it. After upgrading, register it again from its Secret and bind it to the
-Agents. If you already upgraded, _untested_:
+**Steps.** After upgrading, replace each such source, _untested_:
 
-1. In the Namespace's OpenShell Workspace, delete the source's provider (named
-   `oce-cs-` and a digest of the source ID) and the `oce-openai` profile.
-2. Delete the source through OCC, then register and bind it again.
+1. Register a replacement `openai` source from the same Secret. It gets its own
+   profile.
+2. For each Agent bound to the old source:
+   - Grant the Agent's service principal `operate` on the replacement.
+   - Update the Agent so that `credentialSources` lists the replacement instead
+     of the old source, and `harnessAuth.sourceId` names the replacement.
+   - Deploy it, and wait until the new revision is active.
+
+   OCC refuses to delete a source with `409` while an Agent, its active
+   revision, or a pending deployment still references it.
+
+3. In the Namespace's OpenShell Workspace, delete each old source's provider,
+   named `oce-cs-` followed by a digest of the source ID. Then delete the old
+   source through OCC. If it answers `409 CREDENTIAL_WITHDRAWAL_IN_PROGRESS`,
+   retry after the withdrawal work finishes.
+4. Once no old `openai` provider remains, delete the `oce-openai` profile.
+   OpenShell refuses while a provider still uses it.
 
 ## 2026-10-12: demo NetworkPolicy ports must be canonical decimals
 
