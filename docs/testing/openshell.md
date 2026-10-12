@@ -137,8 +137,8 @@ the second Agent still receives its token. The scenario then checks that:
 
 - no Pod of the Agent mounts or references the stored source Secret;
 - the Pod specs, the Agent- and revision-owned Secrets, and the workspace PVC
-  files hold no upstream credential. Files are scanned inside the Pod by
-  credential digest, so no credential enters the Pod;
+  files hold no upstream credential. Files are matched outside the Pod, so no
+  credential-derived value enters it;
 - deployment diagnostics, runtime status and logs, and the Namespace's audit
   events hold neither a credential nor an OpenShell placeholder.
 
