@@ -565,6 +565,16 @@ export const scenarios = {
     description:
       "With recovery-only password sign-in, a disabled account's GitHub sign-in gives the same administrator advice.",
   },
+  recoveryOnlyProviderUnavailable: {
+    group: "Pages/Sign in",
+    name: "Recovery-only provider outage",
+    path: "/console/?authError=github&authReason=provider-unavailable",
+    signedOut: true,
+    githubEnabled: true,
+    passwordRecoveryOnly: true,
+    description:
+      "The provider could not answer or refused the client, so the page says sign-in is unavailable right now and points administrators to Recovery sign-in, not to an identity attach.",
+  },
   googleResultRejected: {
     group: "Pages/Sign in",
     name: "Google result not confirmed",
@@ -1844,6 +1854,36 @@ export const scenarios = {
     description:
       "Search a short repository name. Exact names appear first with their owners visible, followed by prefixes and substrings. Press Enter to add the first match; the query stays available for another addition.",
   },
+  createRepositoriesLocaleSearch: {
+    group: "Pages/Create Agent",
+    name: "Locale-stable repository search",
+    path: create,
+    actions: [...repositoryForm, { selector: "#repository-search", value: "ibm" }],
+    repositoryOptions: [
+      {
+        repositoryRef: "IBM-platform",
+        displayName: "acme/platform",
+        allowedProfiles: ["git-read", "git-write", "git-full"],
+      },
+      {
+        repositoryRef: "handbook",
+        displayName: "acme/handbook",
+        allowedProfiles: ["git-read"],
+      },
+      ...["api", "docs", "infrastructure", "mobile"].map((name) => ({
+        repositoryRef: name,
+        displayName: `acme/${name}`,
+        allowedProfiles: ["git-read", "git-write", "git-full"],
+      })),
+    ],
+    description:
+      "Search matching uses stable casing, so ibm finds the approved IBM-platform reference even when its display name does not contain the query.",
+    steps: [
+      "Confirm that searching for ibm leaves acme/platform visible.",
+      "Select acme/platform and confirm IBM-platform appears as the selected repository reference.",
+    ],
+    gap: "Simulated UI proof only; this preview does not verify GitHub App access or repository credential delivery.",
+  },
   createRepositoriesCustom: {
     group: "Pages/Create Agent",
     name: "Custom access survives default changes",
@@ -2902,7 +2942,7 @@ export const scenarios = {
       "A failed deployment stays failed while its separate cleanup completes. Safe evidence remains after the Pod disappears.",
     steps: [
       "Read the failing oauth-bootstrap exit status beside the successful init container.",
-      "Wait for cleanup to change from pending to completed; the deployment must still show failed.",
+      "Wait for revision cleanup to change from pending to completed; the deployment must still show failed.",
     ],
   },
   agentsDeploymentDenied: {
@@ -4175,6 +4215,28 @@ export const scenarios = {
     ],
     description:
       "An uncertain write blocks retry until Reload lets the reader inspect current content.",
+  },
+  workspaceMissingReadback: {
+    group: "Components/Workspace",
+    name: "Missing file after uncertain create",
+    path: `${revision}&tab=workspace`,
+    deployed: true,
+    rules: [
+      {
+        suffix: "/AGENTS.md",
+        method: "GET",
+        status: 404,
+        code: "NOT_FOUND",
+        message: "The requested workspace file was not found.",
+      },
+      { suffix: "/AGENTS.md", method: "PUT", status: 503, once: true },
+    ],
+    actions: [
+      { selector: '[id="workspace-AGENTS.md"]', value: "# Interrupted first create" },
+      click("Save AGENTS.md"),
+    ],
+    description:
+      "Simulated uncertain creation stays guarded until explicit Reload confirms file absence. Reload opens an empty editor; creation still requires Save.",
   },
   deletionConfirm: {
     group: "Components/Deletion",

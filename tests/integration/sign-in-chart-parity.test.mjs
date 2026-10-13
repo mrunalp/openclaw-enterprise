@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
-import { refuseRewrittenIpv4AuthHost } from "../../apps/controller/src/auth/configuration.ts";
+import { refuseRewrittenIpv4Host } from "../../apps/controller/src/auth/configuration.ts";
 import {
   clientAddressConfiguration,
   createControllerAuth,
@@ -1128,10 +1128,12 @@ describe("sign-in chart parity", { concurrency: true }, () => {
       assert.match(github, /external sign-in\nstarts have no per-client limit/);
       assert.match(google, /^WARNING: api\.trustedProxy is not set\./);
       assert.match(oidc, /^WARNING: api\.trustedProxy is not set\. With GitHub, Google or OIDC/);
+      assert.match(oidc, /Behind an HTTP\nproxy, API calls fail with 403 until it is set\.$/);
       assert.match(
         none,
         /^NOTE: api\.trustedProxy is not set, so failed password sign-ins are limited per\nemail only/,
       );
+      assert.match(none, /Behind an HTTP proxy, API calls fail with 403 until it\nis set\.$/);
       assert.equal(quiet.length, proxied.length * 2);
       for (const text of quiet) {
         assert.equal(text, "");
@@ -1242,7 +1244,7 @@ describe("sign-in chart parity", { concurrency: true }, () => {
           return false;
         }
         try {
-          refuseRewrittenIpv4AuthHost(baseUrl, parsed);
+          refuseRewrittenIpv4Host("OCC_AUTH_BASE_URL", baseUrl, parsed);
         } catch (error) {
           assert.match(
             error.message,
@@ -1513,7 +1515,7 @@ describe("sign-in chart parity", { concurrency: true }, () => {
         await startsUp({ ...environment, OCC_AUTH_BASE_URL: baseUrl }, label);
       });
       // The entrypoint's own code for a value it cannot parse, and its own refusal of a
-      // rewritten IPv4 host: apiAccepts copies refuseRewrittenIpv4AuthHost, and the cases above
+      // rewritten IPv4 host: apiAccepts copies refuseRewrittenIpv4Host, and the cases above
       // start the entrypoint only for values the chart renders, so deleting the call in
       // server.mjs leaves the rest of this test green.
       const ownRefusals = ["console.oce.example.internal", "https://192.168.010.001"].map(

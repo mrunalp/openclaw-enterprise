@@ -94,13 +94,15 @@ same rule to `gatewayNamespace` and `envoyNamespace`, and the chart to
 `controlPlane.dns.namespace` follow the same rule, as the chart does for
 `api.clients` and `dns`: NetworkPolicies select those peers by
 `kubernetes.io/metadata.name`, which only holds Namespace names. A dot, a
-slash, an uppercase letter, or a longer name fails preflight. The shared `digestImage` check in `buildRendered`
-requires the literal `sha256` algorithm and 64 lowercase hexadecimal characters for
-`controlPlane.controllerImage`, `runtime.image`, and enabled `repository.image`.
-`controllerDigestImage` additionally applies the chart and bootstrap-volume
-helper's reference rule to `controlPlane.controllerImage`: a letter or digit
-first, then letters, digits, `.`, `_`, `:`, `/`, or `-` before the digest.
-This controller-specific rule does not change runtime or repository image inputs.
+slash, an uppercase letter, or a longer name fails preflight.
+
+`buildRendered` requires the literal `sha256` algorithm and 64 lowercase
+hexadecimal characters for `controlPlane.controllerImage`, `runtime.image`, and
+enabled `repository.image`. The controller and repository images also follow
+the chart's control-plane image rule (`controlPlaneDigestImage` here): a letter
+or digit first, then letters, digits, `.`, `_`, `:`, `/`, or `-` before the digest.
+`runtime.image` reaches only Compute and keeps `digestImage` (no whitespace or
+second `@`), so IPv6 registry hosts stay valid.
 
 Noncanonical digest casing adds a field-specific diagnostic; the final error
 branch writes only `preflight.json`, leaving no deployable artifacts.
@@ -144,9 +146,10 @@ follow their rule within 200 UTF-16 code units, as in the chart.
 
 `scripts/render-installation-profile.mjs:buildRendered`
 
-An optional `controlPlane.databaseCa.key` must be a simple basename. The chart
-refuses `.`, `..`, and any other key that is not letters, digits, `.`, `_`, or
-`-`. Omit the key to use `ca.pem`.
+An optional `controlPlane.databaseCa.key` must be a Kubernetes Secret key of at
+most 253 characters: not `.`, not a `..` prefix, and only letters, digits, `.`,
+`_`, or `-`. Preflight uses that same rule, so `..ca.pem` and a 254-character
+key fail before Helm. Omit the key to use `ca.pem`.
 
 `validateDatabaseCaMount` checks the generated values against the chart's active
 database-client mounts. With a database CA Secret, `mountPath` cannot equal the
@@ -248,9 +251,10 @@ activation, and repository registry creation need separate evidence.
 - Run `node --test tests/integration/profile-renderer.test.mjs` to exercise the
   CLI and inspect generated profile output.
 - `tests/integration/profile-preflight-chart-parity.test.mjs` runs trusted proxy
-  CIDRs, namespaces, node selectors, sign-in Secret names and keys, controller
-  images, claim names, Backend IDs and free-text values through the renderer and
-  `helm template`, plus the API parser or Compute where they apply.
+  CIDRs and client address headers, namespaces, node selectors, sign-in Secret
+  names and keys, controller images, claim names, Backend IDs and free-text
+  values through the renderer and `helm template`, plus the API parser or
+  Compute where they apply.
 - Inspect `<out-dir>/preflight.json` first. `ok:false` means required input is
   missing or unsupported input was supplied; `values.yaml` and
   `installation.yaml` are intentionally absent.

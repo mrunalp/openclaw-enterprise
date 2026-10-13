@@ -38,9 +38,15 @@ const secretKeyRule = {
   validate: isKubernetesSecretKey,
   description: "a Kubernetes Secret key of at most 253 characters",
 };
+// runtime.image reaches only KubernetesComputeDriver (installation.yaml images.gateway
+// and images.agent), never the chart. Compute requires only the trailing digest, so this
+// keeps the old rule: no whitespace or second @, which no runtime pulls. The chart's
+// control-plane rule would refuse working references such as an IPv6 registry host
+// ([fd00::1]:5000/runtime@sha256:...).
 const digestImage = /^[^@\s]+@sha256:[a-f0-9]{64}$/;
-// The controller reference also feeds prepare-bootstrap-volume and the chart.
-const controllerDigestImage = /^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$/;
+// The chart's rule for the images it renders: the controller (which also feeds
+// prepare-bootstrap-volume) and repository credentials.
+const controlPlaneDigestImage = /^[A-Za-z0-9][A-Za-z0-9._:/-]*@sha256:[a-f0-9]{64}$/;
 // The chart and Node's URL parser both refuse an octet above 255 and a port above 65535.
 // The shape check alone still matches 192.0.2.999 and port 99999.
 function isLiteralIpv4ProxyUrl(value) {
@@ -56,6 +62,16 @@ function isLiteralIpv4ProxyUrl(value) {
   }
   const port = Number(match[2]);
   return Number.isInteger(port) && port <= 65535;
+}
+// Compute and the API's Slack directory also refuse the unspecified address, which names
+// no proxy.
+function channelProxyUrl(value) {
+  if (!isLiteralIpv4ProxyUrl(value)) {
+    return false;
+  }
+  return /^https?:\/\/0\.0\.0\.0:/.test(value)
+    ? "must not use host 0.0.0.0, which names no proxy address."
+    : true;
 }
 const dnsHostname =
   /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
@@ -255,11 +271,18 @@ function asString(source, path, diagnostics, { pattern, validate, description } 
     diagnostics.errors.push(`${path.join(".")} must be a nonempty string.`);
     return "";
   }
-  if (
-    (pattern !== undefined && !pattern.test(value)) ||
-    (validate !== undefined && !validate(value))
-  ) {
+  if (pattern !== undefined && !pattern.test(value)) {
     diagnostics.errors.push(`${path.join(".")} must be ${description}.`);
+    return value;
+  }
+  // A string is that field's own refusal. false keeps the shared description.
+  if (validate !== undefined) {
+    const accepted = validate(value);
+    if (typeof accepted === "string") {
+      diagnostics.errors.push(`${path.join(".")} ${accepted}`);
+    } else if (!accepted) {
+      diagnostics.errors.push(`${path.join(".")} must be ${description}.`);
+    }
   }
   return value;
 }
@@ -288,6 +311,17 @@ function stripUrlEdges(value) {
 // tables can be newer than Helm's, so a letter assigned since then passes here and fails in
 // the chart; no realistic host uses one. Like both, it refuses a bare ? or # (https://host?),
 // which parses to an empty query or fragment but would break the API's auth routes.
+// Sprig urlParse aborts when the written host percent-encodes an ASCII byte: a % whose first
+// hex digit is 0-7 (https://ex%61mple.com, https://example.com%2e). Node publishes the decoded
+// host instead. Escapes whose first hex digit is 8-F stay, because Helm decodes those and
+// then checks the host (https://ex%C3%A4.com). %25, a truncated %, and %GG already fail URL
+// parsing. An IPv4 host that contains % and decodes to an IPv4 address stays on ipv4HostKept.
+// The chart runs its character checks on the decoded host too. Node drops some invisible
+// characters such as U+00AD and U+200B from a host, so https://ex%C2%ADample.com parses here
+// and fails in the chart; check the decoded written host. (Node already refuses the chart's
+// compatibility characters, encoded or not.) Helm built with Go 1.24.9 (Helm 3.19.2) refuses
+// an IPv4-mapped IPv6 host (::ffff:0:0/96) in any spelling, which newer Go and Node accept
+// (Node publishes [::ffff:x:y]). Refuse it so the outcome does not depend on the Helm build.
 function httpOrigin(value) {
   const stripped = stripUrlEdges(value);
   if (
@@ -304,15 +338,40 @@ function httpOrigin(value) {
   } catch {
     return false;
   }
-  return (
-    (url.protocol === "http:" || url.protocol === "https:") &&
-    url.username.length === 0 &&
-    url.password.length === 0 &&
-    url.pathname === "/" &&
-    url.search.length === 0 &&
-    url.hash.length === 0 &&
-    ipv4HostKept(value, url)
-  );
+  if (
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username.length !== 0 ||
+    url.password.length !== 0 ||
+    url.pathname !== "/" ||
+    url.search.length !== 0 ||
+    url.hash.length !== 0 ||
+    !ipv4HostKept(value, url)
+  ) {
+    return false;
+  }
+  // Same written host as ipv4HostKept: C0 and space edges, then the origin's host group.
+  const writtenHost = /^[a-z][a-z\d+.-]*:\/\/(?:[^/?#@]*@)?([^/?#:]+)/i.exec(stripped)?.[1];
+  if (writtenHost !== undefined && /%[0-7][0-9A-Fa-f]/.test(writtenHost)) {
+    return "host must not percent-encode an ASCII byte; the chart's URL parser rejects it.";
+  }
+  if (writtenHost !== undefined && writtenHost.includes("%")) {
+    let decodedHost;
+    try {
+      decodedHost = decodeURIComponent(writtenHost);
+    } catch {
+      return false;
+    }
+    if (/[^\p{L}\p{M}\p{N}\p{P}\p{S}\u200c\u200d]/u.test(decodedHost)) {
+      return "host must not percent-encode a space or invisible character; the chart refuses it in the decoded host.";
+    }
+  }
+  if (url.hostname.startsWith("[")) {
+    const groups = ipv6Groups(url.hostname.slice(1, -1));
+    if (groups.slice(0, 5).every((group) => group === 0) && groups[5] === 0xffff) {
+      return "host must not be an IPv4-mapped IPv6 address, which Helm 3.19.2's URL parser rejects; write the IPv4 address instead.";
+    }
+  }
+  return true;
 }
 
 // The same rule as the chart and OCC_AUTH_BASE_URL: a leading zero is octal, and
@@ -345,25 +404,30 @@ function isCodexSeccompProfile(value) {
   });
 }
 
-function observabilityDestination(value) {
+function parsedObservabilityUrl(value) {
   let url;
   try {
     url = new URL(value);
   } catch {
-    return false;
+    return undefined;
   }
-  return (
-    ["http:", "https:"].includes(url.protocol) &&
-    url.hostname !== "" &&
-    url.username === "" &&
-    url.password === "" &&
-    url.hash === ""
-  );
+  if (
+    !["http:", "https:"].includes(url.protocol) ||
+    url.hostname === "" ||
+    url.username !== "" ||
+    url.password !== "" ||
+    url.hash !== ""
+  ) {
+    return undefined;
+  }
+  return url;
 }
 
-// The chart refuses ".", "..", and any database.caKey that is not a basename.
-function simpleBasename(value) {
-  return value !== "." && value !== ".." && /^[A-Za-z0-9._-]+$/.test(value);
+// ipv4HostKept is the chart and OCC_AUTH_BASE_URL written-host rule. Node's URL parser
+// already refuses an octet above 255, so a parsed IPv4 hostname never has one.
+function observabilityDestination(value) {
+  const url = parsedObservabilityUrl(value);
+  return url !== undefined && ipv4HostKept(value, url);
 }
 
 function validateDatabaseCaMount(values, diagnostics) {
@@ -908,15 +972,32 @@ function renderTrustedProxy(source, diagnostics) {
     description:
       "an IPv4 or IPv6 CIDR with a nonzero prefix, no zone ID, a prefix of 1 through 32 for an IPv4-mapped address, and not covering every IPv4 address",
   });
+  // Like the chart, which lowercases the header before its checks and before it sets
+  // OCC_AUTH_CLIENT_IP_HEADER: X-Forwarded-For is x-forwarded-for.
   const clientAddressHeader = optionalString(
     source,
     [...path, "clientAddressHeader"],
     diagnostics,
     {
-      pattern: /^[a-z0-9][a-z0-9-]{0,63}$/,
-      description: "a single lowercase HTTP header name of at most 64 characters",
+      validate: (value) => /^[a-z0-9][a-z0-9-]{0,63}$/.test(value.toLowerCase()),
+      description: "a single HTTP header name of at most 64 characters",
     },
-  );
+  )?.toLowerCase();
+  // Same list and order as the chart's api.trustedProxy.clientAddressHeader refusal.
+  const refusedClientAddressHeaders = [
+    "x-occ-client-ip",
+    "cookie",
+    "forwarded",
+    "authorization",
+    "host",
+    "origin",
+    "x-api-key",
+  ];
+  if (refusedClientAddressHeaders.includes(clientAddressHeader)) {
+    diagnostics.errors.push(
+      `controlPlane.trustedProxy.clientAddressHeader cannot be ${clientAddressHeader}; use a header that carries plain client addresses, such as x-forwarded-for or x-real-ip.`,
+    );
+  }
   if (preset === "generic" && clientAddressHeader === undefined) {
     diagnostics.errors.push(
       "controlPlane.trustedProxy.clientAddressHeader is required for the generic preset.",
@@ -1314,7 +1395,7 @@ function buildRendered(profile, parsed, diagnostics) {
     description: NAME_RULE,
   });
   const controllerImage = asString(controlPlane, ["controlPlane", "controllerImage"], diagnostics, {
-    pattern: controllerDigestImage,
+    pattern: controlPlaneDigestImage,
     description: "an immutable image reference with a SHA-256 digest",
   });
   const runtimeImage = asString(runtime, ["runtime", "image"], diagnostics, {
@@ -1333,12 +1414,13 @@ function buildRendered(profile, parsed, diagnostics) {
     ? renderExternalSignIn(controlPlane, github, google, oidc, authBaseUrl, diagnostics)
     : {};
   // Without a trusted proxy the API sees the ingress as every browser's address. Existing
-  // source-preserving setups (such as an NLB) stay valid, so this warns rather than fails.
+  // source-preserving setups (such as an NLB) stay valid, so this warns rather than fails
+  // (see openclaw.trustedProxy.notice in the chart for why that was re-checked).
   if (controlPlane.trustedProxy === undefined) {
     diagnostics.warnings.push(
       externalSignIn
-        ? "controlPlane.trustedProxy is not set: failed password sign-ins are limited per email only, and external sign-in starts have no per-client limit, because every browser behind a proxy shares its address. Set it unless the API sees each client's own address."
-        : "controlPlane.trustedProxy is not set: failed password sign-ins are limited per email only, with no per-client-address limit. Set it when a proxy fronts the API.",
+        ? "controlPlane.trustedProxy is not set: failed password sign-ins are limited per email only, and external sign-in starts have no per-client limit, because every browser behind a proxy shares its address. Set it unless the API sees each client's own address. Behind an HTTP proxy, API calls fail with 403 until it is set."
+        : "controlPlane.trustedProxy is not set: failed password sign-ins are limited per email only, with no per-client-address limit. Set it when a proxy fronts the API. Behind an HTTP proxy, API calls fail with 403 until it is set.",
     );
   }
   if (!externalSignIn && controlPlane.recoveryUserId !== undefined) {
@@ -1423,15 +1505,26 @@ function buildRendered(profile, parsed, diagnostics) {
   }
 
   // Same rule the controller applies to Installation observability.url at startup.
-  const observabilityUrl = optionalString(
-    controlPlane,
-    ["controlPlane", "observabilityUrl"],
-    diagnostics,
-    {
-      validate: observabilityDestination,
-      description: "an absolute HTTP or HTTPS URL without credentials or a fragment",
-    },
-  );
+  // A rewritten IPv4 host gets its own sentence; other URL failures stay on the
+  // absolute HTTP(S) message from optionalString.
+  const rawObservabilityUrl = controlPlane.observabilityUrl;
+  const parsedObservability =
+    typeof rawObservabilityUrl === "string"
+      ? parsedObservabilityUrl(rawObservabilityUrl)
+      : undefined;
+  const rewrittenObservabilityIpv4 =
+    parsedObservability !== undefined && !ipv4HostKept(rawObservabilityUrl, parsedObservability);
+  const observabilityUrl = rewrittenObservabilityIpv4
+    ? undefined
+    : optionalString(controlPlane, ["controlPlane", "observabilityUrl"], diagnostics, {
+        validate: observabilityDestination,
+        description: "an absolute HTTP or HTTPS URL without credentials or a fragment",
+      });
+  if (rewrittenObservabilityIpv4) {
+    diagnostics.errors.push(
+      "controlPlane.observabilityUrl IPv4 host must be four decimal octets from 0 to 255 with no leading zeros; other spellings parse as a different address.",
+    );
+  }
 
   const collectorEnabled = asBoolean(
     loggingCollector,
@@ -1489,10 +1582,12 @@ function buildRendered(profile, parsed, diagnostics) {
               resourceNameRule,
             ),
             caKey:
-              optionalString(databaseCa, ["controlPlane", "databaseCa", "key"], diagnostics, {
-                validate: simpleBasename,
-                description: "a simple basename",
-              }) ?? "ca.pem",
+              optionalString(
+                databaseCa,
+                ["controlPlane", "databaseCa", "key"],
+                diagnostics,
+                secretKeyRule,
+              ) ?? "ca.pem",
             caMountPath:
               optionalString(
                 databaseCa,
@@ -1511,7 +1606,7 @@ function buildRendered(profile, parsed, diagnostics) {
               ["channels", "directoryProxyUrl"],
               diagnostics,
               {
-                validate: isLiteralIpv4ProxyUrl,
+                validate: channelProxyUrl,
                 description: "an HTTP(S) literal IPv4 endpoint with an explicit port",
               },
             ),
@@ -1750,7 +1845,7 @@ function buildRendered(profile, parsed, diagnostics) {
                 : {
                     channels: {
                       proxyUrl: asString(channels, ["channels", "runtimeProxyUrl"], diagnostics, {
-                        validate: isLiteralIpv4ProxyUrl,
+                        validate: channelProxyUrl,
                         description: "an HTTP(S) literal IPv4 endpoint with an explicit port",
                       }),
                     },
@@ -1834,7 +1929,7 @@ function buildRendered(profile, parsed, diagnostics) {
     values.repositoryCredentials = {
       enabled: true,
       image: asString(repository, ["repository", "image"], diagnostics, {
-        pattern: digestImage,
+        pattern: controlPlaneDigestImage,
         description: "an immutable image reference with a SHA-256 digest",
       }),
       // Installation startup checks a GitHub Backend ID with isBackendId, then bounds it to

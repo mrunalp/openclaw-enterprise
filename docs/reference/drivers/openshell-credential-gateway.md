@@ -263,7 +263,8 @@ revision:
   `api.openai.com`.
 - **Not covered.** A Platform Admin can create, attach, and exec in Sandboxes in
   any Workspace. A Workspace admin, which includes OCC's gateway principal, can
-  update a source's profile to add hosts or binaries while Sandboxes use it, so anyone holding the Backend credential can redirect the key. With
+  update a source's profile to add hosts or binaries while Sandboxes use it,
+  so anyone holding the Backend credential can redirect the key. With
   `allow_unauthenticated_users` enabled, every caller that reaches the gateway
   is a Platform Admin; never enable it outside disposable development. The OCC
   worker can read the source's Kubernetes Secret directly.

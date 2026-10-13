@@ -95,8 +95,8 @@ fields fail preflight. `controlPlane.releaseName` must satisfy Helm's lowercase
 release-name syntax and be at most 53 characters. Image references in
 `controlPlane.controllerImage`, `runtime.image`, and enabled `repository.image`
 must use literal `sha256` and 64 lowercase hexadecimal characters. Invalid digest
-casing fails preflight without emitting deployable files. The controller reference
-also follows the chart and bootstrap-volume helper: a letter or digit first,
+casing fails preflight without emitting deployable files. The controller and repository
+references also follow the chart's rule: a letter or digit first,
 then letters, digits, `.`, `_`, `:`, `/`, or `-` before the digest. `controlPlane.adminEmail`
 must be an administrator email the bootstrap Job accepts after trim and lowercase:
 one `@` and a dotted domain.
@@ -246,6 +246,9 @@ and `egressCidrs`; `github` also accepts `allowedOrgs` and `allowedTeams`
 ([allowlist](../../reference/authentication/external-sign-in.md#organization-and-team-allowlist));
 `oidc` also accepts `tokenAuth` and `displayName`;
 `trustedProxy` accepts `clientAddressHeader`, required for the `generic` preset.
+Preflight refuses `x-occ-client-ip`, `cookie`, `forwarded`, `authorization`, `host`,
+`origin`, and `x-api-key`; use a header that carries plain client addresses, such as
+`x-forwarded-for` or `x-real-ip`.
 Each `google.allowedDomains` entry must be a lowercase DNS name of at most 253
 characters, such as `example.com`, and its last label must start with a letter.
 Preflight refuses `example.123` and any longer name, which the chart and the API

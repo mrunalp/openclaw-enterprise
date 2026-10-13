@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import { nodeLogExcerpt } from "../../scripts/ci/k3d-diagnostics.mjs";
 import { defaultK3sImage } from "../../scripts/ci/prepare.mjs";
+import { prepareGatewayRouting } from "../../scripts/ci/routing.mjs";
 import {
   assertStderrMatch,
   digest,
@@ -29,7 +30,7 @@ async function eachSettled(items, each) {
 describe("CI k3d preparation", { concurrency: true }, () => {
   test("fixture preparation rejects an unknown proxy source before publishing its environment", async (t) => {
     const commands = await fixtureImageCommands(t, "missing-proxy-source");
-    const result = await commands.prepareAsync();
+    const result = await commands.prepare();
     assert.equal(result.status, 1);
     assertStderrMatch(
       result.stderr,
@@ -39,7 +40,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
     assert.equal(state.env, undefined);
     await assert.rejects(() => stat(commands.githubEnv), { code: "ENOENT" });
     // Failed preparation retains ownership so cleanup can remove the partial cluster.
-    const cleanup = await commands.cleanupAsync();
+    const cleanup = await commands.cleanup();
     assert.equal(cleanup.status, 0, cleanup.stderr);
     await assert.rejects(() => stat(commands.statePath), { code: "ENOENT" });
   });
@@ -71,7 +72,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
           ? { OPENCLAW_CI_K3D_DIAGNOSTICS_TIMEOUT_MS: "5000" }
           : {},
       );
-      const result = await commands.prepareAsync();
+      const result = await commands.prepare();
       assert.equal(result.error, undefined, "diagnostics must finish within the CLI watchdog");
       assert.equal(result.status, 1);
       assert.match(result.stderr.trim().split("\n").at(-1), error);
@@ -129,7 +130,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
       assert.equal(cluster.status, "planned");
       assert.equal(state.env, undefined);
       await assert.rejects(() => stat(commands.githubEnv), { code: "ENOENT" });
-      const cleanup = await commands.cleanupAsync();
+      const cleanup = await commands.cleanup();
       assert.equal(cleanup.status, 0, cleanup.stderr);
       await assert.rejects(() => stat(commands.statePath), { code: "ENOENT" });
       await assert.rejects(() => stat(cluster.directory), { code: "ENOENT" });
@@ -160,7 +161,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
     const commands = await fixtureImageCommands(t, "cluster-create-hangs-once", undefined, {
       OPENCLAW_CI_K3D_CREATE_TIMEOUT_MS: "5000",
     });
-    const result = await commands.prepareAsync();
+    const result = await commands.prepare();
     assert.equal(result.error, undefined, "a hung create must not reach the CLI watchdog");
     assert.equal(result.status, 0, result.stderr);
     assertStderrMatch(
@@ -175,6 +176,11 @@ describe("CI k3d preparation", { concurrency: true }, () => {
       "k3d-create-discard:passed",
       "k3d-create:passed",
     ]);
+    // k3d's own progress reaches the job log as it happens, without colour codes.
+    assertStderrMatch(
+      result.stderr,
+      /^\[prepare:\S+\] k3d: INFO\[0002\] Starting node 'k3d-openclaw-k8s-\S+-server-0'$/m,
+    );
     for (const pid of await hungK3dProcesses(commands)) {
       assert.equal(processRunning(pid), false, `hung k3d process ${pid} must not survive`);
     }
@@ -189,12 +195,18 @@ describe("CI k3d preparation", { concurrency: true }, () => {
     assert.ok(k3d.slice(firstCreate, secondCreate).includes("cluster delete"));
     const evidence = JSON.parse(await readFile(`${commands.statePath}.diagnostics.json`, "utf8"));
     assert.match(evidence.failure, /\(attempt 1 of 2\)$/);
+    // The step k3d stopped in, and a server that runs only k3d's retry loop.
+    assert.match(
+      evidence.k3dCreateOutput,
+      /^INFO\[0002\] Starting node 'k3d-openclaw-k8s-\S+-server-0'$/,
+    );
+    assert.match(evidence.containers[0].processes.value, /kubectl uncordon/);
 
     const state = JSON.parse(await readFile(commands.statePath, "utf8"));
     const clusters = state.resources.filter(({ kind }) => kind === "k3d-cluster");
     assert.equal(clusters.length, 1);
     assert.equal(clusters[0].status, "ready");
-    const cleanup = await commands.cleanupAsync();
+    const cleanup = await commands.cleanup();
     assert.equal(cleanup.status, 0, cleanup.stderr);
     await assert.rejects(() => stat(commands.statePath), { code: "ENOENT" });
   });
@@ -219,7 +231,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
         }
       }
     });
-    const result = await commands.prepareAsync();
+    const result = await commands.prepare();
     escaped = await readFile(escapedPids, "utf8").catch(() => "");
     assert.equal(result.error, undefined, "held output must not reach the CLI watchdog");
     assert.equal(result.status, 0, result.stderr);
@@ -239,7 +251,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
     for (const pid of await hungK3dProcesses(commands)) {
       assert.equal(processRunning(pid), false, `hung k3d process ${pid} must not survive`);
     }
-    const cleanup = await commands.cleanupAsync();
+    const cleanup = await commands.cleanup();
     assert.equal(cleanup.status, 0, cleanup.stderr);
   });
 
@@ -247,7 +259,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
     const commands = await fixtureImageCommands(t, "cluster-create-hangs", undefined, {
       OPENCLAW_CI_K3D_CREATE_TIMEOUT_MS: "3000",
     });
-    const result = await commands.prepareAsync();
+    const result = await commands.prepare();
     assert.equal(result.error, undefined, "a hung create must not reach the CLI watchdog");
     assert.equal(result.status, 1);
     assert.match(
@@ -271,7 +283,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
     assert.equal(cluster.status, "planned");
     assert.equal(state.env, undefined);
     await assert.rejects(() => stat(commands.githubEnv), { code: "ENOENT" });
-    const cleanup = await commands.cleanupAsync();
+    const cleanup = await commands.cleanup();
     assert.equal(cleanup.status, 0, cleanup.stderr);
     await assert.rejects(() => stat(commands.statePath), { code: "ENOENT" });
     await assert.rejects(() => stat(cluster.directory), { code: "ENOENT" });
@@ -311,10 +323,65 @@ describe("CI k3d preparation", { concurrency: true }, () => {
     assert.doesNotMatch(excerpt, /do-not-publish|localhost:8080 was refused/);
   });
 
+  test("k3d node log excerpts keep a K3s exit that the entrypoint's API retries follow", () => {
+    const at = (second) => new Date(Date.UTC(2026, 9, 12, 22, 56, second)).toISOString();
+    const discovery = (second, detail) =>
+      `${at(second)} E1012 22:56:00.000000 ${second} memcache.go:265] "Unhandled Error" ` +
+      `err="couldn't get current server API group list: ${detail}"`;
+    const refused = (second, server) =>
+      Array.from({ length: 4 }, () =>
+        discovery(
+          second,
+          `Get \\"${server}/api?timeout=32s\\": dial tcp: connect: connection refused`,
+        ),
+      ).concat(
+        `${at(second)} The connection to the server ${server.replace(/^https?:\/\//, "")} was refused - did you specify the right host or port?`,
+      );
+    const stdout = [
+      `${at(0)} level=info msg="Starting k3s v1.35.9+k3s1"`,
+      ...refused(0, "http://localhost:8080"),
+      discovery(1, "the server is currently unable to handle the request"),
+      `${at(1)} Error from server (ServiceUnavailable): the server is currently unable to handle the request`,
+      // Newer kubectl appends a logger field after the error.
+      `${at(1)} E1012 22:56:01.000000 1 memcache.go:265] "Unhandled Error" err="couldn't get current server ` +
+        `API group list: Get \\"https://127.0.0.1:6443/api?timeout=32s\\": net/http: TLS handshake timeout" ` +
+        `logger="UnhandledError"`,
+      `${at(1)} Unable to connect to the server: net/http: TLS handshake timeout`,
+      // K3s's own lines stay, whatever they say.
+      `${at(2)} level=error msg="fixture K3s line: couldn't get current server API group list: kept"`,
+      `${at(2)} level=fatal msg="fixture K3s exit cause"`,
+      // The finding 1174 node logged API retries for five minutes after K3s exited.
+      ...Array.from({ length: 400 }, (_, retry) =>
+        refused(5 + retry * 3, "https://127.0.0.1:6443"),
+      ).flat(),
+    ].join("\n");
+    const excerpt = nodeLogExcerpt(stdout, "");
+    assert.match(
+      excerpt,
+      /msg="fixture K3s line: couldn't get current server API group list: kept"\n.*msg="fixture K3s exit cause"$/,
+    );
+    assert.match(
+      excerpt,
+      new RegExp(
+        [
+          `^\\[diagnostics omitted 5 kubectl retry lines against localhost:8080 \\(connection refused\\), ${at(0)} to ${at(0)}\\]`,
+          `\\[diagnostics omitted 2 kubectl retry lines against the API server \\(ServiceUnavailable\\), ${at(1)} to ${at(1)}\\]`,
+          `\\[diagnostics omitted 1 kubectl retry lines against 127\\.0\\.0\\.1:6443 \\(TLS handshake timeout\\), ${at(1)} to ${at(1)}\\]`,
+          `\\[diagnostics omitted 1 kubectl retry lines against the API server \\(TLS handshake timeout\\), ${at(1)} to ${at(1)}\\]`,
+          `\\[diagnostics omitted 2000 kubectl retry lines against 127\\.0\\.0\\.1:6443 \\(connection refused\\), ${at(5)} to ${at(1202)}\\]\n`,
+        ].join("\n"),
+      ),
+    );
+    assert.doesNotMatch(
+      excerpt,
+      /memcache|was refused|Error from server|Unable to connect|logger=/,
+    );
+  });
+
   for (const scenario of ["storage-unready", "storage-after-image-unready"]) {
     test(`fixture preparation reports unavailable storage without publishing workload inputs: ${scenario}`, async (t) => {
       const commands = await fixtureImageCommands(t, scenario);
-      const result = await commands.prepareAsync();
+      const result = await commands.prepare();
       assert.equal(result.status, 1);
       assertStderrMatch(result.stderr, /CI fixture storage controller is not ready/);
       assertStderrMatch(result.stderr, /CrashLoopBackOff/);
@@ -325,7 +392,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
       await assert.rejects(() => stat(commands.githubEnv), { code: "ENOENT" });
       const state = JSON.parse(await readFile(commands.statePath, "utf8"));
       assert.equal(state.env, undefined);
-      const cleanup = await commands.cleanupAsync();
+      const cleanup = await commands.cleanup();
       assert.equal(cleanup.status, 0, cleanup.stderr);
     });
   }
@@ -353,7 +420,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
           // Stop at the next independent preparation boundary after image import.
           OCC_TEST_KUBERNETES_CODEX_VERSION: "0.153.0",
         });
-        const result = await commands.prepareAsync();
+        const result = await commands.prepare();
         assert.equal(result.status, 1);
         const calls = await commands.commands();
         const pulls = calls.filter(
@@ -382,7 +449,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
           assert.equal(imported[0].sourceImage, immutableImage);
           assert.equal(imported[0].hostImageId, `sha256:${"b".repeat(64)}`);
         }
-        const cleanup = await commands.cleanupAsync();
+        const cleanup = await commands.cleanup();
         assert.equal(cleanup.status, 0, cleanup.stderr);
         assert.ok(
           !(await commands.commands()).some(
@@ -421,7 +488,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
           OCC_TEST_KUBERNETES_CODEX_VERSION: "0.153.0",
           OPENCLAW_CI_K3D_IMAGE_CHECK_TIMEOUT_MS: "3000",
         });
-        const result = await commands.prepareAsync();
+        const result = await commands.prepare();
         assert.equal(result.status, 1, scenario);
         assertStderrMatch(
           result.stderr,
@@ -448,7 +515,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
           false,
           scenario,
         );
-        const cleanup = await commands.cleanupAsync();
+        const cleanup = await commands.cleanup();
         assert.equal(cleanup.status, 0, cleanup.stderr);
       },
     );
@@ -458,13 +525,13 @@ describe("CI k3d preparation", { concurrency: true }, () => {
     const commands = await fixtureImageCommands(t, "hung-host-owned", undefined, {
       OPENCLAW_CI_K3D_IMAGE_CHECK_TIMEOUT_MS: "3000",
     });
-    const result = await commands.prepareAsync();
+    const result = await commands.prepare();
     assert.equal(result.status, 1);
     assertStderrMatch(
       result.stderr,
       /The container engine did not answer within 3000 ms \(image inspect localhost\/\S+\/fixture:local\)\./,
     );
-    const cleanup = await commands.cleanupAsync();
+    const cleanup = await commands.cleanup();
     assert.equal(cleanup.status, 0, cleanup.stderr);
   });
 
@@ -474,7 +541,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
       const commands = await fixtureImageCommands(t, scenario, "k3d-fixture-configuration", {
         OPENCLAW_CI_K3S_IMAGE: image,
       });
-      const result = await commands.prepareAsync();
+      const result = await commands.prepare();
       assert.equal(result.status, scenario === "success" ? 0 : 1, result.stderr);
       const state = JSON.parse(await readFile(commands.statePath, "utf8"));
       const cluster = state.resources.find(({ kind }) => kind === "k3d-cluster");
@@ -494,14 +561,35 @@ describe("CI k3d preparation", { concurrency: true }, () => {
         );
         assert.equal(state.env, undefined);
       }
-      const cleanup = await commands.cleanupAsync();
+      const cleanup = await commands.cleanup();
       assert.equal(cleanup.status, 0, cleanup.stderr);
     });
   });
 
+  // K3s installs the Gateway API CRDs with Traefik, and routing waits up to 180 s for each one.
+  // A lane added to lanesWithoutK3sAddons that also sets up routing must fail at once instead.
+  test("gateway routing refuses a cluster created without K3s's Traefik before any side effect", async (t) => {
+    const commands = await fixtureImageCommands(t, "success", "k3d-fixture-configuration");
+    const result = await commands.prepare();
+    assert.equal(result.status, 0, result.stderr);
+    const state = JSON.parse(await readFile(commands.statePath, "utf8"));
+    const cluster = state.resources.find(({ kind }) => kind === "k3d-cluster");
+    assert.deepEqual(cluster.disabledK3sAddons, ["traefik", "servicelb", "metrics-server"]);
+    await assert.rejects(
+      prepareGatewayRouting({
+        cluster,
+        execFile: () => assert.fail("routing ran a command against a cluster without Traefik"),
+      }),
+      { message: /Gateway routing needs K3s's Traefik add-on/ },
+    );
+    await assert.rejects(stat(join(cluster.directory, "gateway-routing")), { code: "ENOENT" });
+    const cleanup = await commands.cleanup();
+    assert.equal(cleanup.status, 0, cleanup.stderr);
+  });
+
   test("fixture preparation waits for a late worker and its containerd before importing", async (t) => {
     const commands = await fixtureImageCommands(t, "late-worker");
-    const result = await commands.prepareAsync();
+    const result = await commands.prepare();
     assert.equal(result.status, 0, result.stderr);
     assertStderrMatch(
       result.stderr,
@@ -526,7 +614,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
       ({ args }) => args[0] === "exec" && args[1] === "-i" && args[2].endsWith("-agent-0"),
     );
     assert.ok(agentProbe >= 0 && agentImport > agentProbe);
-    const cleanup = await commands.cleanupAsync();
+    const cleanup = await commands.cleanup();
     assert.equal(cleanup.status, 0, cleanup.stderr);
   });
 
@@ -534,7 +622,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
     const commands = await fixtureImageCommands(t, "containerd-down", undefined, {
       OPENCLAW_CI_K3D_CONTAINERD_WAIT_MS: "2000",
     });
-    const result = await commands.prepareAsync();
+    const result = await commands.prepare();
     assert.equal(result.status, 1);
     assertStderrMatch(
       result.stderr,
@@ -552,7 +640,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
       evidence.failure,
       /image import into k3d nodes failed: containerd on k3d-\S+-agent-0 did not answer/,
     );
-    const cleanup = await commands.cleanupAsync();
+    const cleanup = await commands.cleanup();
     assert.equal(cleanup.status, 0, cleanup.stderr);
   });
 
@@ -560,7 +648,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
     const commands = await fixtureImageCommands(t, "hung-containerd-probe", undefined, {
       OPENCLAW_CI_K3D_IMAGE_CHECK_TIMEOUT_MS: "3000",
     });
-    const result = await commands.prepareAsync();
+    const result = await commands.prepare();
     assert.equal(result.status, 1);
     assertStderrMatch(
       result.stderr,
@@ -579,7 +667,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
       calls.some(({ args }) => args[0] === "exec" && args[1] === "-i"),
       false,
     );
-    const cleanup = await commands.cleanupAsync();
+    const cleanup = await commands.cleanup();
     assert.equal(cleanup.status, 0, cleanup.stderr);
   });
 
@@ -600,7 +688,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
   ]) {
     test(`fixture preparation retries an import once only for the node socket: ${scenario}`, async (t) => {
       const commands = await fixtureImageCommands(t, scenario);
-      const result = await commands.prepareAsync();
+      const result = await commands.prepare();
       assert.equal(result.status, imported ? 0 : 1, result.stderr);
       assert.equal(
         /containerd refused the image import; waiting for it/.test(result.stderr),
@@ -635,7 +723,7 @@ describe("CI k3d preparation", { concurrency: true }, () => {
         );
         assert.match(evidence.failure, /image import into k3d nodes failed/);
       }
-      const cleanup = await commands.cleanupAsync();
+      const cleanup = await commands.cleanup();
       assert.equal(cleanup.status, 0, cleanup.stderr);
     });
   }
