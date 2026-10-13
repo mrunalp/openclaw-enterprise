@@ -8,6 +8,55 @@ newest first. Steps marked _untested_ have not been run against a real
 Installation. When this page nears the word limit, its oldest notices move to a
 new page named for the date they precede.
 
+## 2026-10-12: model credentials in provider headers and request auth
+
+**What breaks.** On Kubernetes Compute, Configuration create and update,
+provisioning, Preset saves, Agent create and update, and deployment answer
+`400` naming the setting for any `models.providers.<provider>`, even one no
+model setting selects, that has:
+
+- a credential header in `headers` (on the provider or one of its `models`)
+  or `request.headers`: a name whose last hyphen- or underscore-separated
+  word, after any trailing number, is `auth`, `authorization`, `bearer`,
+  `cookie`, `credential`, `passcode`, `passphrase`, `password`, `secret`,
+  `signature` or `token` (or a plural), or that ends in `key` or `keys` except
+  an idempotency or cache key, such as `Proxy-Authorization`, `x-goog-api-key`,
+  `X-Auth-Key`, `x-auth-token` or `Cookie` (widened on 2026-10-13, below);
+- a header name that is not a valid HTTP field name (spaces, zero-width or
+  non-ASCII characters);
+- a `request.auth` other than exactly `{mode: "provider-default"}`.
+
+Every Configuration Driver, on every Compute, also answers `400` for a literal
+where a reference is required: those headers (on models too),
+`request.auth.token` and `request.auth.value`, and the `cert`, `key` and
+`passphrase` of `request.tls` and `request.proxy.tls`. It refuses a
+`request.proxy.url` with a user name or password. Preset saves run the
+Kubernetes rules before the Configuration Driver's, so a literal gets the
+Kubernetes message.
+
+**Who is affected.** Configurations that carry such headers, `request.auth`,
+TLS client keys or proxy credentials. A stored Configuration still reads and
+an edit can replace it; saving it unchanged and deployment refuse it with the
+same message.
+
+**How to tell.** Kubernetes Compute's `400` names
+`models.providers.<provider>.headers`, `.request.headers` or `.request.auth`.
+The Configuration Driver's names a JSON pointer, such as
+`/models/providers/<provider>/request/auth/token holds a credential value inline`.
+
+**Steps.** Read the Configuration, then save it without the refused setting.
+The Agent's Harness authentication is the only supported path for model
+credentials; select the credential there after that save, since an Agent save
+that names the Configuration is refused with the same message until then.
+
+- On Kubernetes Compute, remove every credential header and any `request.auth`
+  other than `{mode: "provider-default"}`. A `${NAME}` reference is refused
+  there too.
+- On other Compute, the Configuration Driver accepts a `${NAME}` reference in
+  those slots instead of a literal.
+- For TLS client keys and proxy credentials, on any Compute, store the value
+  as a Secret and write a `${NAME}` reference.
+
 ## 2026-10-12: repository credential images follow the control-plane image rule
 
 **What breaks.** The chart (since #2221) and now profile preflight refuse a
