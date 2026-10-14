@@ -157,8 +157,9 @@ registers:
 - **Request IDs.** Configure and rotate calls carry a UUID that OpenShell
   replays for 24 hours, so a retried call is not applied twice.
 
-The supervisor picks up re-minted tokens on its provider poll (every 10 seconds by default). Reconfiguring refresh material
-starts a new OpenShell authorization epoch, revoking running Sandboxes’ placeholders.
+The supervisor picks up re-minted tokens on its provider poll (every 10
+seconds by default). Reconfiguring refresh material starts a new OpenShell
+authorization epoch, revoking running Sandboxes’ placeholders.
 
 ## How sources map to OpenShell
 
@@ -276,7 +277,8 @@ revision:
   only. ChatGPT-account sign-in, Google service accounts, AWS STS, token
   exchange, and other OpenShell source types remain unavailable.
 - After an update of an OAuth2 source's material, running Agents lose its
-  token within one Sandbox provider poll (10 seconds by default) and receive none until they are redeployed.
+  token within one Sandbox provider poll (10 seconds by default) and receive
+  none until they are redeployed.
 - OCC does not perform the initial OAuth2 sign-in for a refresh-token source;
   supply the refresh token from a completed sign-in in a Secret.
 - Only one OpenShell Backend can be configured.

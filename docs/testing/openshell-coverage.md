@@ -54,16 +54,16 @@ Next, the Codex scenario takes each dependency away and restores it before
 asserting:
 
 - **Tool upstream.** The echo Service selects no Pod. OpenShell must end the
-  request without a response (curl exit 52), and the token must be substituted
-  again once the Service is restored.
+  request without a response (curl exit 52), and the upstream must receive the
+  source's own token again once the Service is restored.
 - **Model provider.** Cluster DNS sends the model host to a Service with no
   endpoints. The turn must fail without exposing the key, and the same
   revision must serve the next turn once DNS is restored.
 - **OpenShell gateway.** The Namespace's gateway StatefulSet is scaled to zero.
   While it is down, the running Agent cannot serve a turn, a source read
   reports `failed`, registration returns `503 DEPENDENCY_UNAVAILABLE`, and a
-  redeploy stays queued. Once the gateway is back, the redeploy activates and
-  serves a turn without operator action.
+  redeploy fails at least one attempt and stays queued. Once the gateway is
+  back, the redeploy activates and serves a turn without operator action.
 
 After the restart, an OAuth2 source whose refresh was due fails with
 `refresh_configuration_invalid` and is retried only an hour later

@@ -4389,6 +4389,12 @@ async function runSandboxProbe(topology, nonce, script, harnessPod = topology.ha
     `printf '%s' '${Buffer.from(script).toString("base64")}' | base64 -d > ${scriptPath} && ` +
       `chmod 0644 ${scriptPath}`,
   );
+  // Every credential the suite holds is checked on each turn, before any of it is printed.
+  const secrets = [
+    process.env.OPENAI_API_KEY,
+    ...(topology.toolSources ?? []).map(({ token }) => token),
+    topology.untrustedTlsSource?.token,
+  ].filter(Boolean);
   // The model occasionally answers without calling the exec tool, most often on the first turn
   // after cluster DNS for the model host was restored. That says nothing about OpenShell, so the
   // turn is asked again after a pause; the probe's own results are never retried.
@@ -4407,7 +4413,12 @@ async function runSandboxProbe(topology, nonce, script, harnessPod = topology.ha
         `Use the shell exec tool to run exactly this one command: bash ${scriptPath}. ` +
         `Then reply with exactly ${nonce}.`,
     });
-    assert.equal(JSON.stringify(result).includes(process.env.OPENAI_API_KEY), false);
+    const serialized = JSON.stringify(result);
+    assert.equal(
+      secrets.some((value) => serialized.includes(value)),
+      false,
+      "a probe turn must not expose a credential.",
+    );
     completed = result.items
       .filter(({ method }) => method === "item/completed")
       .map(({ params }) => params?.item);
@@ -4428,10 +4439,6 @@ async function runSandboxProbe(topology, nonce, script, harnessPod = topology.ha
       "agent",
       "--tail=400",
     ).catch((error) => `logs unavailable: ${error.message}`);
-    const secrets = [
-      process.env.OPENAI_API_KEY,
-      ...(topology.toolSources ?? []).map(({ token }) => token),
-    ].filter(Boolean);
     const relevant = String(logs)
       .split("\n")
       .filter((line) => /error|retry|retrying|disconnect|stream|tool|exec/i.test(line))
@@ -4519,8 +4526,7 @@ async function assertCredentialRouteEnforcement(topology) {
     "",
   ].join("\n");
   const tlsEventsBefore = (await untrustedTls.events()).length;
-  const { result, value, exitCode } = await runSandboxProbe(topology, nonce, script);
-  assert.equal(JSON.stringify(result).includes(untrustedTlsSource.token), false);
+  const { value, exitCode } = await runSandboxProbe(topology, nonce, script);
   // Pod-level NetworkPolicy governs connections made outside the Sandbox's network namespace,
   // such as the supervisor's. The provider-fenced profile grants the Pod no public egress.
   const podNetwork = JSON.parse(
@@ -4909,6 +4915,14 @@ async function assertModelProviderOutageFailsClosed(topology) {
   // Restore DNS before any assertion; keep the first error if both steps fail.
   try {
     await setModelProviderDns(topology, undefined);
+    await kubectl(
+      "delete",
+      "service",
+      "model-outage",
+      "--namespace",
+      untrustedTls.namespace,
+      "--ignore-not-found",
+    );
   } catch (error) {
     failure ??= error;
   }
@@ -4968,14 +4982,18 @@ async function assertToolUpstreamOutageFailsClosed(topology) {
         `-H "Authorization: Bearer $${toolA.environmentName}" ${toolA.url}`,
       `printf 'TOOL_PLACEHOLDER=%s\\n' "$(grep -o '"placeholder":[a-z]*' ${body} ` +
         `2>/dev/null | cut -d: -f2)"`,
+      `printf 'TOOL_DIGEST=%s\\n' "$(grep -o '"digest":"[0-9a-f]*"' ${body} ` +
+        `2>/dev/null | cut -d'"' -f4)"`,
       "",
     ].join("\n");
-    const { result, value, exitCode } = await runSandboxProbe(topology, nonce, script, harnessPod);
-    assert.equal(JSON.stringify(result).includes(toolA.token), false);
+    const { value, exitCode } = await runSandboxProbe(topology, nonce, script, harnessPod);
+    // The echo answers 200 even without an Authorization header, so delivery is proved by the
+    // digest of what it received, compared here and never printed.
     return {
       httpStatus: value("TOOL_OUT"),
       exitCode: exitCode("TOOL"),
       placeholder: value("TOOL_PLACEHOLDER") || null,
+      tokenDelivered: value("TOOL_DIGEST") === toolA.digest,
     };
   };
   const selectPods = (app) =>
@@ -5030,9 +5048,14 @@ async function assertToolUpstreamOutageFailsClosed(topology) {
     { httpStatus: "000", exitCode: 52 },
     "OpenShell must end a request to an unreachable upstream without a response.",
   );
-  // Once the upstream is back, the same running Harness gets the token substituted again.
-  assert.equal(recovered.httpStatus, "200");
-  assert.equal(recovered.placeholder, "false", "the upstream must receive the substituted token.");
+  assert.equal(outage.tokenDelivered, false, "no token may arrive while the upstream is down.");
+  // Once the upstream is back, the same running Harness gets tool A's own token again.
+  assert.deepEqual(
+    { httpStatus: recovered.httpStatus, exitCode: recovered.exitCode },
+    { httpStatus: "200", exitCode: 0 },
+  );
+  assert.equal(recovered.placeholder, "false", "the upstream must not receive the placeholder.");
+  assert.equal(recovered.tokenDelivered, true, "the upstream must receive tool A's token.");
 }
 
 /**
@@ -5071,6 +5094,7 @@ async function assertOpenShellGatewayOutage(topology) {
     );
   const registrationName = `openshell-outage-${randomUUID()}`;
   const observed = {};
+  let outageSecretId;
   let redeployed;
   let failure;
   await scale(0);
@@ -5080,19 +5104,20 @@ async function assertOpenShellGatewayOutage(topology) {
       async () => ((await gatewayPods()).length === 0 ? true : undefined),
       180_000,
     );
+    let downTurn;
     try {
-      const turn = await requestCodexTurnFromGatewayPod({
+      downTurn = await requestCodexTurnFromGatewayPod({
         namespace: topology.gatewayPlacement,
         gatewayPod: await currentGatewayPod(topology),
         providerModel,
         prompt: `Reply with exactly OCC-OPENSHELL-GATEWAY-DOWN-${randomUUID()}.`,
       });
-      assert.equal(JSON.stringify(turn).includes(process.env.OPENAI_API_KEY), false);
-      observed.runningAgentTurn = "completed";
     } catch (error) {
       assert.equal(String(error?.message).includes(process.env.OPENAI_API_KEY), false);
-      observed.runningAgentTurn = "failed";
     }
+    observed.runningAgentTurn = downTurn === undefined ? "failed" : "completed";
+    // Checked outside the try, so a turn that completed and leaked the key cannot read as failed.
+    assert.equal(JSON.stringify(downTurn ?? {}).includes(process.env.OPENAI_API_KEY), false);
     const source = await request("GET", sourcePath);
     observed.sourceRead = {
       httpStatus: source.status,
@@ -5103,6 +5128,7 @@ async function assertOpenShellGatewayOutage(topology) {
       value: `oce-outage-${randomUUID()}`,
     });
     assert.equal(secret.status, 201, JSON.stringify(secret.error));
+    outageSecretId = secret.data.id;
     const registered = await request("POST", `/namespaces/${namespaceId}/credential-sources`, {
       name: registrationName,
       type: "bearer-token",
@@ -5120,18 +5146,27 @@ async function assertOpenShellGatewayOutage(topology) {
     };
     redeployed = await request("POST", `${agentPath}/deploy`);
     assert.equal(redeployed.status, 202, JSON.stringify(redeployed.error));
-    // Give the worker time to attempt the revision while the gateway is down.
-    await delay(60_000);
-    const deployment = await request("GET", `${agentPath}/deployments/${redeployed.data.id}`);
-    const work = await observerPool.query(
-      "SELECT state, reason_code, attempt_count FROM occ.controller_work WHERE idempotency_key = $1",
-      [`agent_revision:${redeployed.data.id}:reconcile`],
+    // A claim marks the work `claimed` and counts an attempt; a failed attempt returns it to
+    // `queued`. Waiting for that while the gateway is still at zero replicas proves the worker
+    // tried the revision against the stopped gateway and did not activate it.
+    const work = await waitFor(
+      `deployment ${redeployed.data.id} to fail an attempt while the gateway is down`,
+      async () => {
+        const { rows } = await observerPool.query(
+          "SELECT state, reason_code, attempt_count FROM occ.controller_work WHERE idempotency_key = $1",
+          [`agent_revision:${redeployed.data.id}:reconcile`],
+        );
+        return rows[0]?.state === "queued" && rows[0].attempt_count >= 1 ? rows[0] : undefined;
+      },
+      180_000,
     );
+    const deployment = await request("GET", `${agentPath}/deployments/${redeployed.data.id}`);
     const during = await request("GET", agentPath);
     observed.redeployDuringOutage = {
       status: deployment.data?.status ?? null,
-      work: work.rows[0] ?? null,
+      work,
       activeRevisionUnchanged: during.data?.activeRevisionId === activeRevisionId,
+      gatewayStopped: (await gatewayPods()).length === 0,
     };
   } catch (error) {
     failure = error;
@@ -5256,6 +5291,8 @@ async function assertOpenShellGatewayOutage(topology) {
   assert.equal(observed.runningAgentTurn, "failed");
   assert.deepEqual(observed.sourceRead, { httpStatus: 200, state: "failed" });
   assert.deepEqual(observed.registration, { httpStatus: 503, code: "DEPENDENCY_UNAVAILABLE" });
+  assert.equal(observed.redeployDuringOutage.gatewayStopped, true);
+  assert.equal(observed.redeployDuringOutage.status, "queued");
   assert.equal(observed.redeployDuringOutage.activeRevisionUnchanged, true);
   // Once the gateway is back, the held deployment proceeds without operator action.
   assert.equal(observed.recovery.redeployActivated, true, JSON.stringify(observed.recovery));
@@ -5269,6 +5306,20 @@ async function assertOpenShellGatewayOutage(topology) {
     if (rotated !== null) {
       assert.deepEqual(rotated, { httpStatus: 200, state: "ready" }, `${type} rotation`);
     }
+  }
+  // Once the outage registration is gone, its Secret is unbound and can be deleted.
+  if (outageSecretId !== undefined) {
+    await waitFor(
+      `outage Secret ${outageSecretId} deletion`,
+      async () => {
+        const removed = await request(
+          "DELETE",
+          `/namespaces/${namespaceId}/secrets/${outageSecretId}`,
+        );
+        return [204, 404].includes(removed.status) ? true : undefined;
+      },
+      120_000,
+    );
   }
 }
 
