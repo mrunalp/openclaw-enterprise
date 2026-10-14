@@ -1512,6 +1512,14 @@ function createIntegrationSandboxDriverFactory(
           assert.ok(state, `OpenShell gateway for namespace ${namespaceName} was not initialized.`);
           return clientForEndpoint(state.endpoint);
         },
+        // Each Namespace runs its own gateway Service, as for a production Backend with a bare
+        // `serviceName`: without a namespace there is no placement. The Credential Gateway
+        // Driver refuses token_url hosts in that namespace.
+        placement(namespaceName) {
+          return namespaceName === undefined
+            ? undefined
+            : { service: `openshell-${hash(namespaceName, 10)}`, namespace: namespaceName };
+        },
         close() {
           for (const client of endpointClients.values()) {
             client.close();
