@@ -4555,20 +4555,22 @@ async function assertCredentialRouteEnforcement(topology) {
   // Classify what the foreign host received by the echo's placeholder flag and header length,
   // so a substituted model key is recognized without hashing or printing it. Only OpenShell's
   // own endpoint-mismatch refusal counts as refused: a transport failure or another error could
-  // follow a forwarded credential, so it proves nothing and fails the check.
+  // follow a forwarded credential, so it proves nothing and fails the check. curl prints 200 even
+  // when the body then fails to arrive, so a 200 counts only with a clean exit, and an empty
+  // header only when the echo reported length 0.
   const foreignReceived = (() => {
     const length = Number(value("FOREIGN_LENGTH"));
     const status = value("FOREIGN_OUT");
     if (status === "403" && value("FOREIGN_REFUSAL") === "credential_endpoint_mismatch") {
       return "refused";
     }
-    if (status !== "200") {
+    if (status !== "200" || exitCode("FOREIGN") !== 0) {
       return `unverified-${status}`;
     }
     if (value("FOREIGN_PLACEHOLDER") === "true") {
       return "placeholder";
     }
-    if (length === 0) {
+    if (value("FOREIGN_LENGTH") === "0") {
       return "empty";
     }
     if (length === `Bearer ${process.env.OPENAI_API_KEY}`.length) {
@@ -4583,6 +4585,7 @@ async function assertCredentialRouteEnforcement(topology) {
     },
     foreignDestination: {
       httpStatus: value("FOREIGN_OUT"),
+      exitCode: exitCode("FOREIGN"),
       received: foreignReceived,
     },
     modelHostFromCurl: {
