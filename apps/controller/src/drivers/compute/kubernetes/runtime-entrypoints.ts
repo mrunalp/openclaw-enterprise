@@ -3546,9 +3546,6 @@ function probeCodexAuthentication(timeout) {
         "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + ".requires_openai_auth=true",
         "-c", "model_providers." + pluginRuntime.manifest.modelEndpoint.modelProvider + ".supports_websockets=false",
       ]),
-      ...(loginMode === "chatgpt_service_account" ? [
-        "-c", "forced_chatgpt_workspace_id=" + JSON.stringify(workspaceId),
-      ] : []),
       "Reply only READY. Do not use tools.",
     ], {
       cwd: directory,
@@ -4215,6 +4212,7 @@ function readinessFail(reason) {
     (response) => {
       let body = "";
       response.setEncoding("utf8");
+      response.on("error", () => readinessExit(reason));
       response.on("data", (chunk) => {
         body += chunk;
         if (body.length > 65536) readinessExit(reason);
@@ -4247,6 +4245,9 @@ function checkPluginStatus(ready) {
     (response) => {
       let body = "";
       response.setEncoding("utf8");
+      response.on("error", (error) =>
+        readinessFail("plugin runtime status unavailable: " + readinessErrorCode(error)),
+      );
       response.on("data", (chunk) => {
         body += chunk;
         if (body.length > 65536) readinessExit("plugin runtime status response is too large");
