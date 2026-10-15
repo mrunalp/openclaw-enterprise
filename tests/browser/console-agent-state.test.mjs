@@ -1153,8 +1153,10 @@ test("Agents list row actions stop and delete an Agent through the real API", as
   const stop = runningRow.getByRole("button", { name: "Stop Running Agent" });
   const remove = runningRow.getByRole("button", { name: "Delete Running Agent" });
   await stop.waitFor();
-  // A new Agent is created with a stopped requested state, so it offers no Stop until deployed.
-  assert.equal(await draftRow.getByRole("button", { name: "Stop Draft Agent" }).isDisabled(), true);
+  // A new Agent is created with a stopped requested state and no version, so like Agent detail
+  // its row offers no Stop until a first deploy; Delete stays available.
+  await draftRow.getByRole("button", { name: "Delete Draft Agent" }).waitFor();
+  assert.equal(await draftRow.getByRole("button", { name: "Stop Draft Agent" }).count(), 0);
   assert.equal(await stop.isDisabled(), false);
   // Only a stop with a selected version is labelled; a never-deployed draft reads "No current version".
   assert.equal(await draftRow.getByText("Stop requested", { exact: true }).count(), 0);
@@ -1172,6 +1174,15 @@ test("Agents list row actions stop and delete an Agent through the real API", as
   assert.equal(await stop.evaluate((node) => node.ownerDocument.activeElement === node), true);
   assert.deepEqual(nonAuthWriteRequests(requests), []);
 
+  // At a narrow width the table scrolls sideways to reach Actions. Accepting a row action
+  // redraws the table, which must keep that position instead of jumping back to the names.
+  await page.setViewportSize({ width: 390, height: 844 });
+  const scrolledLeft = await page.evaluate(() => {
+    const scroller = globalThis.document.querySelector(".table-scroll");
+    scroller.scrollLeft = scroller.scrollWidth;
+    return scroller.scrollLeft;
+  });
+  assert.ok(scrolledLeft > 0, "the narrow table should scroll horizontally");
   await stop.click();
   dialog = page.getByRole("dialog", { name: "Stop Running Agent?" });
   const stopResponse = page.waitForResponse(
@@ -1183,6 +1194,15 @@ test("Agents list row actions stop and delete an Agent through the real API", as
   await page.getByRole("status").getByText("Stop requested for Running Agent.").waitFor();
   await runningRow.getByText("Stop requested", { exact: true }).waitFor();
   assert.equal(await stop.isDisabled(), true);
+  // With Stop now disabled, focus falls back to the Agent's name, which sits off-screen to the
+  // left; moving focus there must not scroll the table either.
+  await page.waitForFunction(
+    () => globalThis.document.activeElement?.textContent === "Running Agent",
+  );
+  assert.equal(
+    await page.evaluate(() => globalThis.document.querySelector(".table-scroll").scrollLeft),
+    scrolledLeft,
+  );
   // The list stays in place: stopping from a row does not open the Agent.
   assert.equal(new URL(page.url()).pathname, "/console/agents");
   assert.equal(agentStopRequests(requests, namespace.id, running.id).length, 1);
@@ -1224,7 +1244,7 @@ test("Agents list row actions stop and delete an Agent through the real API", as
   );
 });
 
-test("Agents list row actions report denials and hold an uncertain stop until Refresh", async (t) => {
+test("Agents list row actions explain missing access and still report a refused or uncertain write", async (t) => {
   const fixture = await createConsoleAppFixture(t, { provisionedPeople: ["row-reader"] });
   await fixture.bootstrap();
   const namespace = await fixture.createNamespace("Row denial", { ready: true });
@@ -1245,20 +1265,44 @@ test("Agents list row actions report denials and hold an uncertain stop until Re
       },
     });
     assert.equal(binding.status, 201);
+    return binding.data;
   };
   // A reader who can list and open the Agent but holds neither operate nor delete on it.
   await bind([{ action: "read", resourceKind: "namespace" }], "namespace", namespace.id);
   await bind([{ action: "read", resourceKind: "agent" }], "agent", agent.id);
   const { page } = await newPage(t, fixture);
+  const requests = apiRequests(page, fixture.origin);
   const agentPath = `/namespaces/${namespace.id}/agents/${agent.id}`;
+  const refresh = page.getByRole("button", { name: "Refresh", exact: true });
+  const stopEnabled = () =>
+    page.waitForFunction(
+      () =>
+        globalThis.document.querySelector('[aria-label="Stop Guarded Agent"]')?.disabled === false,
+    );
 
   await login(page, fixture, listUrl(namespace.id), person.credentials);
   const row = page.getByRole("row").filter({ hasText: "Guarded Agent" });
   const stop = row.getByRole("button", { name: "Stop Guarded Agent" });
   const remove = row.getByRole("button", { name: "Delete Guarded Agent" });
-  await stop.waitFor();
 
-  // The controller's IAM check refuses both writes; the row stays usable and unchanged.
+  // The Agent's real permission read reports neither action, so both icons are disabled with a
+  // visible reason before any confirmation, and nothing is sent.
+  await row.getByText("No access to stop or delete", { exact: true }).waitFor();
+  assert.equal(await stop.isDisabled(), true);
+  assert.equal(await remove.isDisabled(), true);
+  assert.deepEqual(nonAuthWriteRequests(requests), []);
+
+  // An operate grant shows after Refresh: Stop becomes available while Delete stays explained.
+  const operate = await bind([{ action: "operate", resourceKind: "agent" }], "agent", agent.id);
+  await refresh.click();
+  await row.getByText("No access to delete", { exact: true }).waitFor();
+  await stopEnabled();
+  assert.equal(await remove.isDisabled(), true);
+
+  // The read is advice, not authorization: once the grant is removed, the controller refuses the
+  // confirmed write and the row reports that refusal without changing the Agent.
+  const removed = await fixture.request("DELETE", `${policyPath}/access-bindings/${operate.id}`);
+  assert.ok([200, 204].includes(removed.status), `binding removal answered ${removed.status}`);
   await stop.click();
   await page
     .getByRole("dialog", { name: "Stop Guarded Agent?" })
@@ -1270,26 +1314,14 @@ test("Agents list row actions report denials and hold an uncertain stop until Re
       "You do not have permission to stop Guarded Agent. Ask an administrator for Agent operate access.",
     )
     .waitFor();
-  await remove.click();
-  await page
-    .getByRole("dialog", { name: "Delete Guarded Agent?" })
-    .getByRole("button", { name: "Permanently delete Agent" })
-    .click();
-  await page
-    .getByRole("alert")
-    .getByText(
-      "You do not have permission to delete Guarded Agent. Ask an administrator for Agent delete access.",
-    )
-    .waitFor();
-  assert.equal(await stop.isDisabled(), false);
-  assert.equal(await remove.isDisabled(), false);
-  const unchanged = await fixture.request("GET", agentPath);
-  assert.equal(unchanged.data.status, "active");
-  assert.equal(unchanged.data.desiredRuntimeState, "running");
+  assert.equal(agentStopRequests(requests, namespace.id, agent.id).length, 1);
+  assert.equal((await fixture.request("GET", agentPath)).data.desiredRuntimeState, "running");
 
   // A dropped connection leaves the outcome unknown, so the row refuses another write until
   // Refresh rereads the Agent; the console never resends the stop by itself.
   await bind([{ action: "operate", resourceKind: "agent" }], "agent", agent.id);
+  await refresh.click();
+  await stopEnabled();
   await page.route(`${fixture.origin}${agentPath}/stop`, (route) => route.abort("failed"), {
     times: 1,
   });
@@ -1305,10 +1337,10 @@ test("Agents list row actions report denials and hold an uncertain stop until Re
     )
     .waitFor();
   assert.equal(await stop.isDisabled(), true);
-  assert.equal(await remove.isDisabled(), true);
-  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  assert.equal(agentStopRequests(requests, namespace.id, agent.id).length, 2);
+  await refresh.click();
   await page.getByRole("alert").waitFor({ state: "detached" });
-  assert.equal(await stop.isDisabled(), false);
+  await stopEnabled();
   assert.equal((await fixture.request("GET", agentPath)).data.desiredRuntimeState, "running");
 
   await stop.click();

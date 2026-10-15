@@ -1191,6 +1191,16 @@ select:not([multiple])[size="1"] {
   width: 16px;
   height: 16px;
 }
+.icon-button-spacer {
+  width: 34px;
+  height: 34px;
+}
+.row-action-note {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
 .agent-list-feedback > .notice,
 .agent-list-feedback > .error {
   margin: 0 0 20px;

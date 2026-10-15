@@ -86,6 +86,12 @@ export function renderAgentList(context) {
   // disabled until Refresh rereads the list, so the console never repeats an uncertain write.
   const unsettled = new Set();
   const rowControls = new Map();
+  // Advisory caller permissions per Agent, read as on Agent detail. A refusal disables that
+  // row's icon before confirmation; a failed read keeps the usual path, and the API still
+  // authorizes every write.
+  const permissionReads = new Set();
+  const permissions = new Map();
+  let restrictOpenDialog = null;
   const create = button("Create Agent", () => context.navigate("agents/new"), {
     className: "primary",
   });
@@ -144,11 +150,32 @@ export function renderAgentList(context) {
     const controls = rowControls.get(id);
     if (!controls) {
       search.focus();
-    } else if (!controls[kind].disabled) {
+    } else if (controls[kind] && !controls[kind].disabled) {
       controls[kind].focus();
     } else {
-      controls.name.focus();
+      // At a narrow width the name is scrolled out of view; keep the table where it was.
+      controls.name.focus({ preventScroll: true });
     }
+  }
+
+  function readPermissions(item) {
+    if (permissionReads.has(item.id) || item.status === "deleting") {
+      return;
+    }
+    permissionReads.add(item.id);
+    void context.request(`${agentPath(item.id)}/permissions`).then(
+      (answer) => {
+        if (!context.isCurrent()) {
+          return;
+        }
+        permissions.set(item.id, answer);
+        if (answer?.operate === false || answer?.delete === false) {
+          restrictOpenDialog?.(item.id, answer);
+          render();
+        }
+      },
+      () => {},
+    );
   }
 
   function reportFailure(item, error, kind) {
@@ -237,10 +264,14 @@ export function renderAgentList(context) {
     });
     let pending = false;
     let submitted = false;
+    const permission = stopping ? "operate" : "delete";
     const cancel = button("Cancel", () => dialog.close());
     const confirm = button(
       stopping ? "Stop Agent" : "Permanently delete Agent",
       async () => {
+        if (permissions.get(item.id)?.[permission] === false) {
+          return;
+        }
         pending = true;
         submitted = true;
         cancel.disabled = true;
@@ -252,15 +283,33 @@ export function renderAgentList(context) {
       },
       { className: "danger" },
     );
+    const descriptionNodes = descriptions.map((text, index) =>
+      element(
+        "p",
+        { id: `agent-row-confirm-description-${index}`, "aria-live": index ? "off" : "polite" },
+        text,
+      ),
+    );
+    // A refusal that arrives while the dialog is open disables confirmation, as on Agent
+    // detail. A late answer cannot recall a request already sent.
+    const restrict = (id, answer) => {
+      if (id !== item.id || !dialog.open || pending || answer?.[permission] !== false) {
+        return;
+      }
+      confirm.disabled = true;
+      descriptionNodes[0].textContent = stopping
+        ? "Your access does not include stopping this Agent."
+        : "Your access does not include deleting this Agent.";
+      cancel.focus();
+    };
+    restrictOpenDialog = restrict;
     dialog.append(
       element(
         "h2",
         { id: "agent-row-confirm-title" },
         `${stopping ? "Stop" : "Delete"} ${item.name}?`,
       ),
-      ...descriptions.map((text, index) =>
-        element("p", { id: `agent-row-confirm-description-${index}` }, text),
-      ),
+      ...descriptionNodes,
       element("div", { className: "form-actions" }, cancel, confirm),
     );
     dialog.addEventListener("cancel", (event) => {
@@ -271,6 +320,9 @@ export function renderAgentList(context) {
     dialog.addEventListener(
       "close",
       () => {
+        if (restrictOpenDialog === restrict) {
+          restrictOpenDialog = null;
+        }
         dialog.remove();
         if (!context.isCurrent()) {
           return;
@@ -288,20 +340,41 @@ export function renderAgentList(context) {
     cancel.focus();
   }
 
+  // Every disabled icon has a visible reason: a badge, the alert above the table, or a note.
   function rowActions(item) {
     // A deleting Agent keeps its retry and status controls on its detail page.
     const available = item.status !== "deleting" && !unsettled.has(item.id);
     const stopped = item.desiredRuntimeState === "stopped";
-    const stop = button(
-      actionIcon("stop"),
-      (event) => confirmAction(item, "stop", event.currentTarget),
-      {
-        className: "icon-button",
-        "aria-label": `Stop ${item.name}`,
-        title: stopped ? (item.activeRevisionId ? "Stop requested" : "Not running") : "Stop Agent",
-        disabled: !available || stopped,
-      },
-    );
+    // New Agents start stopped with no version, so there is nothing to stop yet; Agent detail
+    // shows no Stop control then either.
+    const neverStarted = stopped && !item.activeRevisionId;
+    const allowed = permissions.get(item.id);
+    const canStop = neverStarted || allowed?.operate !== false;
+    const canDelete = allowed?.delete !== false;
+    const noteId = `agent-row-note-${item.id}`;
+    const badgeId = `agent-row-badge-${item.id}`;
+    let restriction = null;
+    if (!canStop && !canDelete) {
+      restriction = "No access to stop or delete";
+    } else if (!canStop) {
+      restriction = "No access to stop";
+    } else if (!canDelete) {
+      restriction = "No access to delete";
+    }
+    const describedBy = (blocked, badge) => {
+      const ids = [blocked ? noteId : null, badge].filter(Boolean);
+      return ids.length ? { "aria-describedby": ids.join(" ") } : {};
+    };
+    const stop = neverStarted
+      ? null
+      : button(actionIcon("stop"), (event) => confirmAction(item, "stop", event.currentTarget), {
+          className: "icon-button",
+          "aria-label": `Stop ${item.name}`,
+          title: "Stop Agent",
+          disabled: !available || stopped || !canStop,
+          // A deleting or Stop requested badge explains a stopped Agent's disabled icon.
+          ...describedBy(!canStop, stopped ? badgeId : null),
+        });
     const remove = button(
       actionIcon("delete"),
       (event) => confirmAction(item, "delete", event.currentTarget),
@@ -309,10 +382,14 @@ export function renderAgentList(context) {
         className: "icon-button",
         "aria-label": `Delete ${item.name}`,
         title: "Delete Agent",
-        disabled: !available,
+        disabled: !available || !canDelete,
+        ...describedBy(!canDelete, item.status === "deleting" ? badgeId : null),
       },
     );
-    return { stop, delete: remove };
+    const note = restriction
+      ? element("span", { className: "row-action-note", id: noteId }, restriction)
+      : null;
+    return { stop, delete: remove, note };
   }
 
   function render() {
@@ -359,6 +436,7 @@ export function renderAgentList(context) {
     const body = element("tbody");
     rowControls.clear();
     for (const item of matches) {
+      readPermissions(item);
       const name = link(item.name, `agents/${item.id}`, context);
       const actions = rowActions(item);
       rowControls.set(item.id, { name, ...actions });
@@ -432,12 +510,22 @@ export function renderAgentList(context) {
             {},
             name,
             element("span", { className: "resource-id" }, item.id),
-            item.status === "deleting" ? element("span", { className: "badge" }, "Deleting") : null,
+            item.status === "deleting"
+              ? element(
+                  "span",
+                  { className: "badge", id: `agent-row-badge-${item.id}` },
+                  "Deleting",
+                )
+              : null,
             // New Agents start stopped; only a stop with a selected version awaits shutdown.
             item.status === "active" &&
               item.desiredRuntimeState === "stopped" &&
               item.activeRevisionId
-              ? element("span", { className: "badge" }, "Stop requested")
+              ? element(
+                  "span",
+                  { className: "badge", id: `agent-row-badge-${item.id}` },
+                  "Stop requested",
+                )
               : null,
             item.configurationReadError
               ? element("span", { className: "badge" }, "Saved configuration unreadable")
@@ -460,13 +548,23 @@ export function renderAgentList(context) {
           element(
             "td",
             {},
-            element("div", { className: "agent-row-actions" }, actions.stop, actions.delete),
+            element(
+              "div",
+              { className: "agent-row-actions" },
+              actions.stop ?? element("span", { className: "icon-button-spacer" }),
+              actions.delete,
+            ),
+            actions.note,
           ),
         ),
       );
     }
     table.append(body);
-    rows.replaceChildren(element("div", { className: "table-scroll" }, table));
+    // Row actions redraw the table; keep a narrow viewport's horizontal scroll position.
+    const scrollLeft = rows.querySelector(".table-scroll")?.scrollLeft ?? 0;
+    const scroller = element("div", { className: "table-scroll" }, table);
+    rows.replaceChildren(scroller);
+    scroller.scrollLeft = scrollLeft;
   }
   search.addEventListener("input", render);
   render();

@@ -789,7 +789,7 @@ export const scenarios = {
     steps: [
       "Cancel the dialog and check focus returns to the Stop icon.",
       "Open it again and select Stop Agent. The row shows Stop requested, its Stop icon is disabled, and the list stays open.",
-      "Documentation assistant has never been deployed, so its Stop icon starts disabled.",
+      "In Populated, never-deployed Agents show no Stop icon, as on Agent detail.",
     ],
     gap: "The fixture records the requested state only. Live runtime shutdown is not simulated.",
   },
@@ -827,7 +827,7 @@ export const scenarios = {
       { selector: ".agent-stop-dialog button.danger", click: true },
     ],
     description:
-      "A denied row Stop names the missing Agent operate access. The row stays running and its actions stay available.",
+      "Permission advice allowed Stop, but the controller refuses the confirmed write, as after a removed grant. The alert names the missing Agent operate access; the row stays running.",
   },
   agentsRowDeleteDenied: {
     group: "Pages/Agents",
@@ -845,7 +845,20 @@ export const scenarios = {
       { selector: ".agent-delete-dialog button.danger", click: true },
     ],
     description:
-      "A denied row deletion names the missing Agent delete access and leaves the Agent in the list.",
+      "Permission advice allowed Delete, but the controller refuses the confirmed write. The alert names the missing Agent delete access; the Agent stays in the list.",
+  },
+  agentsRowRestricted: {
+    group: "Pages/Agents",
+    name: "Row actions unavailable for this caller",
+    deployed: true,
+    readOnlyPermissionSummary: true,
+    description:
+      "The permission summary says this caller can neither stop nor delete these Agents. Each row disables its icons and says why before any confirmation.",
+    steps: [
+      "Find No access to stop or delete under each row's icons. The icons do not open a confirmation.",
+      "Open an Agent: its detail page explains the same restrictions.",
+    ],
+    gap: "The summary is advisory. The controller still authorizes each write.",
   },
   agentsRowStopUnknown: {
     group: "Pages/Agents",

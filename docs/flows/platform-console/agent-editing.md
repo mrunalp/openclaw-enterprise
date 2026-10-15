@@ -320,9 +320,13 @@ Agent read; a deleting read clears that guard, a failed read does not. Cancel
 returns focus to the repeat-request button. The browser never retries DELETE automatically.
 
 `apps/controller/src/console/agents/collection.mjs:renderAgentList` row icons
-send the same Stop and Delete requests after the shared confirmations. An
-accepted response replaces the row; the list does not poll. A `404`, `409`, or
-unconfirmed outcome disables the row's icons until **Refresh**.
+send the same Stop and Delete requests after the shared confirmations. Each row
+reads its Agent's [permission advice](../../reference/api.md#get-namespacesnamespaceidagentsagentidpermissions);
+a refusal disables that icon with a visible note, or, during confirmation,
+disables confirmation and focuses Cancel. A stopped Agent with no selected
+revision shows no Stop icon. An accepted response replaces the row; the list does
+not poll. A `404`, `409`, or unconfirmed outcome disables the row's icons until
+**Refresh**.
 
 `packages/occ/src/index.ts:deleteAgent` owns deletion admission. The
 [Agent deletion reference](../../reference/agents.md#deletion) covers
@@ -361,7 +365,7 @@ worker cleanup and the Namespace-owned resources it preserves.
 
 ## Changelog
 
-- 2026-10-15 23:37: Trace Stop and Delete from Agents list rows in the accompanying change. (authoring-run/ec250085-6194-47f8-afe8-37bcf489e158 - e03429ce3d889b0ac07fedad801aacacc3498a6a)
+- 2026-10-15 23:37: Trace Stop and Delete from Agents list rows, with permission advice, in the accompanying change. (authoring-run/ec250085-6194-47f8-afe8-37bcf489e158 - e03429ce3d889b0ac07fedad801aacacc3498a6a)
 - 2026-10-15 21:30: Separate selected version, recorded deployment, and live-serving uncertainty; surface failed-version recovery. (authoring-run/6d9b833d-e4fc-4f58-98a8-f0fac29f709d - 7adac57cc03545bdd3cdc383c88219396a677fd9)
 - 2026-10-15 04:40: Hide stop controls for a never-deployed Agent in the accompanying change. (authoring-run/2aecf15b-82ac-4724-94d9-45b8c1c99fc6 - c78f96b706ce94dbfe6aadfdac9c40e7e7e759ae)
 - 2026-10-10 20:00: Keep untouched CRLF workspace files clean; only an edit enables Save. (public-pr/2000 - a3ca862c37d05ba850d3c9595e5668917d7f480d)

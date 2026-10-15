@@ -23,6 +23,7 @@ export const RowDeleteConfirmation = story("agentsRowDeleteConfirm");
 export const RowStopDenied = story("agentsRowStopDenied");
 export const RowDeleteDenied = story("agentsRowDeleteDenied");
 export const RowStopUnknown = story("agentsRowStopUnknown");
+export const RowRestricted = story("agentsRowRestricted");
 
 export const LatestDeploymentFailed = story("agentsDeploymentFailed");
 export const LatestDeploymentDenied = story("agentsDeploymentDenied");
