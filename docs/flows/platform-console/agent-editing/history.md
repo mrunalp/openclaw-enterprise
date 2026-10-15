@@ -8,6 +8,8 @@ This record preserves the dated changes to the Console Agent editing flow. See t
 
 ## Changelog
 
+- 2026-10-10 20:00: Keep untouched CRLF workspace files clean; only an edit enables Save. (public-pr/2000 - a3ca862c37d05ba850d3c9595e5668917d7f480d)
+- 2026-10-10 08:46: Trace keyboard focus after Stop confirmation cancellation. (authoring-run/9c1f0e85-9f16-436e-900f-b3d0e6e8cdd9 - b8783d7942e875c6eb751222329c63fac5c028a1)
 - 2026-10-10 02:44: Trace explicit missing-file readback after an uncertain workspace create in the accompanying change. (authoring-run/16c725e2-438f-46bf-a31c-305458ac49d8 - 5bf37b274fcdfefb49dfa99984a15d99b757dc8e)
 - 2026-10-10 01:41: Trace confirmed manual deletion recovery and uncertain repeat readback in the accompanying change. (authoring-run/da61175b-df1b-4e96-b202-94e9e82538f9 - 243b38ba6d951240065e5061e1e4abccdb44410c)
 - 2026-10-10 00:08: Trace explicit repeated Stop recovery in the accompanying change. (authoring-run/52a975bb-0283-40ba-9126-2c2f6eb8992c - 21f34928437fb7d6f4391ba4af5d3e15bf9ce480)

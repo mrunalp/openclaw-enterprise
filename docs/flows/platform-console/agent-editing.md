@@ -368,7 +368,5 @@ worker cleanup and the Namespace-owned resources it preserves.
 - 2026-10-15 23:37: Trace Stop and Delete from Agents list rows, with permission advice, in the accompanying change. (authoring-run/ec250085-6194-47f8-afe8-37bcf489e158 - e03429ce3d889b0ac07fedad801aacacc3498a6a)
 - 2026-10-15 21:30: Separate selected version, recorded deployment, and live-serving uncertainty; surface failed-version recovery. (authoring-run/6d9b833d-e4fc-4f58-98a8-f0fac29f709d - 7adac57cc03545bdd3cdc383c88219396a677fd9)
 - 2026-10-15 04:40: Hide stop controls for a never-deployed Agent in the accompanying change. (authoring-run/2aecf15b-82ac-4724-94d9-45b8c1c99fc6 - c78f96b706ce94dbfe6aadfdac9c40e7e7e759ae)
-- 2026-10-10 20:00: Keep untouched CRLF workspace files clean; only an edit enables Save. (public-pr/2000 - a3ca862c37d05ba850d3c9595e5668917d7f480d)
-- 2026-10-10 08:46: Trace keyboard focus after Stop confirmation cancellation. (authoring-run/9c1f0e85-9f16-436e-900f-b3d0e6e8cdd9 - b8783d7942e875c6eb751222329c63fac5c028a1)
 
 [Console Agent editing documentation history](agent-editing/history.md) preserves the older dated entries.
