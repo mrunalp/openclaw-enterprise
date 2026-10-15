@@ -327,10 +327,12 @@ export function renderAgentList(context) {
         if (!context.isCurrent()) {
           return;
         }
-        if (submitted) {
-          focusRow(item.id, kind);
-        } else if (invoker.isConnected) {
+        // A redraw while the dialog was open (a permission refusal, for example) replaces the
+        // invoking icon, so fall back to the row's current controls.
+        if (!submitted && invoker.isConnected && !invoker.disabled) {
           invoker.focus();
+        } else {
+          focusRow(item.id, kind);
         }
       },
       { once: true },

@@ -1280,10 +1280,42 @@ test("Agents list row actions explain missing access and still report a refused 
         globalThis.document.querySelector('[aria-label="Stop Guarded Agent"]')?.disabled === false,
     );
 
+  // Hold the first permission read so the reader can open Stop before the real answer arrives.
+  let releaseAdvice;
+  const adviceHeld = new Promise((resolve) => {
+    releaseAdvice = resolve;
+  });
+  await page.route(
+    `${fixture.origin}${agentPath}/permissions`,
+    async (route) => {
+      await adviceHeld;
+      await route.continue().catch(() => {});
+    },
+    { times: 1 },
+  );
+
   await login(page, fixture, listUrl(namespace.id), person.credentials);
   const row = page.getByRole("row").filter({ hasText: "Guarded Agent" });
   const stop = row.getByRole("button", { name: "Stop Guarded Agent" });
   const remove = row.getByRole("button", { name: "Delete Guarded Agent" });
+
+  // A refusal that arrives while the dialog is open disables confirmation and moves focus to
+  // Cancel. The redraw replaced the icon that opened the dialog, so closing it must land focus
+  // on the row (its name, since Stop is now disabled) rather than dropping it to the page.
+  await stop.click();
+  const dialog = page.getByRole("dialog", { name: "Stop Guarded Agent?" });
+  await dialog.waitFor();
+  releaseAdvice();
+  await dialog.getByText("Your access does not include stopping this Agent.").waitFor();
+  const confirm = dialog.getByRole("button", { name: "Stop Agent" });
+  assert.equal(await confirm.isDisabled(), true);
+  const cancel = dialog.getByRole("button", { name: "Cancel" });
+  assert.equal(await cancel.evaluate((node) => node.ownerDocument.activeElement === node), true);
+  await cancel.click();
+  await dialog.waitFor({ state: "hidden" });
+  await page.waitForFunction(
+    () => globalThis.document.activeElement?.textContent === "Guarded Agent",
+  );
 
   // The Agent's real permission read reports neither action, so both icons are disabled with a
   // visible reason before any confirmation, and nothing is sent.
