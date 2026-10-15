@@ -4,14 +4,17 @@ import test from "node:test";
 import { DEPLOYMENT_POLL_MS } from "../../apps/controller/src/console/agents/detail.mjs";
 import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import {
+  apiRequests,
   detailUrl,
   login,
   nativeValues,
   newPage,
+  nonAuthWriteRequests,
   persistedDeploymentError,
   trackSettledFetches,
   waitForIdleFetches,
 } from "./console-agents-browser-helpers.mjs";
+import { agentDeleteRequests, agentStopRequests } from "./console-agents-test-support.mjs";
 
 function deploymentBody(
   namespaceId,
@@ -1130,4 +1133,189 @@ test("Agent detail does not move shown sections when Deployment activity first s
   const shifts = await page.evaluate(() => globalThis.__layoutShifts);
   const shift = shifts.reduce((sum, entry) => sum + entry.value, 0);
   assert.ok(shift < 0.01, `layout shift ${shift}: ${JSON.stringify(shifts)}`);
+});
+
+const listUrl = (namespaceId) => `/console/agents?namespace=${namespaceId}`;
+
+test("Agents list row actions stop and delete an Agent through the real API", async (t) => {
+  const fixture = await createConsoleAppFixture(t);
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Row actions", { ready: true });
+  const running = await fixture.createAgent(namespace.id, "Running Agent", nativeValues("run"));
+  const active = await fixture.seedActiveAgentRevision(namespace.id, running.id);
+  const draft = await fixture.createAgent(namespace.id, "Draft Agent", nativeValues("draft"));
+  const { page } = await newPage(t, fixture);
+  const requests = apiRequests(page, fixture.origin);
+
+  await login(page, fixture, listUrl(namespace.id));
+  const runningRow = page.getByRole("row").filter({ hasText: "Running Agent" });
+  const draftRow = page.getByRole("row").filter({ hasText: "Draft Agent" });
+  const stop = runningRow.getByRole("button", { name: "Stop Running Agent" });
+  const remove = runningRow.getByRole("button", { name: "Delete Running Agent" });
+  await stop.waitFor();
+  // A new Agent is created with a stopped requested state, so it offers no Stop until deployed.
+  assert.equal(await draftRow.getByRole("button", { name: "Stop Draft Agent" }).isDisabled(), true);
+  assert.equal(await stop.isDisabled(), false);
+  // Only a stop with a selected version is labelled; a never-deployed draft reads "No current version".
+  assert.equal(await draftRow.getByText("Stop requested", { exact: true }).count(), 0);
+  assert.equal(await runningRow.getByText("Stop requested", { exact: true }).count(), 0);
+  requests.length = 0;
+
+  // Cancelling the confirmation sends nothing and returns focus to the row's icon.
+  await stop.click();
+  let dialog = page.getByRole("dialog", { name: "Stop Running Agent?" });
+  await dialog
+    .getByText(/Configuration, versions, Credentials, and workspace data are retained/)
+    .waitFor();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await dialog.waitFor({ state: "hidden" });
+  assert.equal(await stop.evaluate((node) => node.ownerDocument.activeElement === node), true);
+  assert.deepEqual(nonAuthWriteRequests(requests), []);
+
+  await stop.click();
+  dialog = page.getByRole("dialog", { name: "Stop Running Agent?" });
+  const stopResponse = page.waitForResponse(
+    (response) =>
+      response.url() === `${fixture.origin}/namespaces/${namespace.id}/agents/${running.id}/stop`,
+  );
+  await dialog.getByRole("button", { name: "Stop Agent" }).click();
+  assert.equal((await stopResponse).status(), 202);
+  await page.getByRole("status").getByText("Stop requested for Running Agent.").waitFor();
+  await runningRow.getByText("Stop requested", { exact: true }).waitFor();
+  assert.equal(await stop.isDisabled(), true);
+  // The list stays in place: stopping from a row does not open the Agent.
+  assert.equal(new URL(page.url()).pathname, "/console/agents");
+  assert.equal(agentStopRequests(requests, namespace.id, running.id).length, 1);
+  // Stop records only the requested state; the selected version is kept for the worker.
+  const stopped = await fixture.request("GET", `/namespaces/${namespace.id}/agents/${running.id}`);
+  assert.equal(stopped.data.desiredRuntimeState, "stopped");
+  assert.equal(stopped.data.activeRevisionId, active.revision.id);
+
+  // Deletion names the kept Configuration and model Secret, then queues cleanup.
+  await remove.click();
+  dialog = page.getByRole("dialog", { name: "Delete Running Agent?" });
+  await dialog
+    .getByText(
+      `occ configuration delete ${running.configurationId} and occ secret delete ${running.harnessAuth.source.id}`,
+      { exact: false },
+    )
+    .waitFor();
+  const deleteResponse = page.waitForResponse(
+    (response) =>
+      response.url() === `${fixture.origin}/namespaces/${namespace.id}/agents/${running.id}` &&
+      response.request().method() === "DELETE",
+  );
+  await dialog.getByRole("button", { name: "Permanently delete Agent" }).click();
+  assert.equal((await deleteResponse).status(), 202);
+  await page.getByRole("status").getByText("Deletion requested for Running Agent.").waitFor();
+  await runningRow.getByText("Deleting", { exact: true }).waitFor();
+  assert.equal(await remove.isDisabled(), true);
+  assert.equal(await stop.isDisabled(), true);
+  assert.equal(agentDeleteRequests(requests, namespace.id, running.id).length, 1);
+  const deleting = await fixture.request("GET", `/namespaces/${namespace.id}/agents/${running.id}`);
+  assert.equal(deleting.data.status, "deleting");
+
+  // Each row acts on its own Agent: the other one stays active and deletable.
+  const untouched = await fixture.request("GET", `/namespaces/${namespace.id}/agents/${draft.id}`);
+  assert.equal(untouched.data.status, "active");
+  assert.equal(
+    await draftRow.getByRole("button", { name: "Delete Draft Agent" }).isDisabled(),
+    false,
+  );
+});
+
+test("Agents list row actions report denials and hold an uncertain stop until Refresh", async (t) => {
+  const fixture = await createConsoleAppFixture(t, { provisionedPeople: ["row-reader"] });
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Row denial", { ready: true });
+  const agent = await fixture.createAgent(namespace.id, "Guarded Agent", nativeValues("guard"));
+  await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+  const person = fixture.provisionedAccounts[0];
+  const policyPath = `/namespaces/${namespace.id}/iam`;
+  const bind = async (permissions, resourceKind, resourceId) => {
+    const role = await fixture.request("POST", `${policyPath}/roles`, { body: { permissions } });
+    assert.equal(role.status, 201);
+    const binding = await fixture.request("POST", `${policyPath}/access-bindings`, {
+      body: {
+        subjectKind: "identity",
+        subjectId: person.principal.id,
+        roleId: role.data.id,
+        resourceKind,
+        resourceId,
+      },
+    });
+    assert.equal(binding.status, 201);
+  };
+  // A reader who can list and open the Agent but holds neither operate nor delete on it.
+  await bind([{ action: "read", resourceKind: "namespace" }], "namespace", namespace.id);
+  await bind([{ action: "read", resourceKind: "agent" }], "agent", agent.id);
+  const { page } = await newPage(t, fixture);
+  const agentPath = `/namespaces/${namespace.id}/agents/${agent.id}`;
+
+  await login(page, fixture, listUrl(namespace.id), person.credentials);
+  const row = page.getByRole("row").filter({ hasText: "Guarded Agent" });
+  const stop = row.getByRole("button", { name: "Stop Guarded Agent" });
+  const remove = row.getByRole("button", { name: "Delete Guarded Agent" });
+  await stop.waitFor();
+
+  // The controller's IAM check refuses both writes; the row stays usable and unchanged.
+  await stop.click();
+  await page
+    .getByRole("dialog", { name: "Stop Guarded Agent?" })
+    .getByRole("button", { name: "Stop Agent" })
+    .click();
+  await page
+    .getByRole("alert")
+    .getByText(
+      "You do not have permission to stop Guarded Agent. Ask an administrator for Agent operate access.",
+    )
+    .waitFor();
+  await remove.click();
+  await page
+    .getByRole("dialog", { name: "Delete Guarded Agent?" })
+    .getByRole("button", { name: "Permanently delete Agent" })
+    .click();
+  await page
+    .getByRole("alert")
+    .getByText(
+      "You do not have permission to delete Guarded Agent. Ask an administrator for Agent delete access.",
+    )
+    .waitFor();
+  assert.equal(await stop.isDisabled(), false);
+  assert.equal(await remove.isDisabled(), false);
+  const unchanged = await fixture.request("GET", agentPath);
+  assert.equal(unchanged.data.status, "active");
+  assert.equal(unchanged.data.desiredRuntimeState, "running");
+
+  // A dropped connection leaves the outcome unknown, so the row refuses another write until
+  // Refresh rereads the Agent; the console never resends the stop by itself.
+  await bind([{ action: "operate", resourceKind: "agent" }], "agent", agent.id);
+  await page.route(`${fixture.origin}${agentPath}/stop`, (route) => route.abort("failed"), {
+    times: 1,
+  });
+  await stop.click();
+  await page
+    .getByRole("dialog", { name: "Stop Guarded Agent?" })
+    .getByRole("button", { name: "Stop Agent" })
+    .click();
+  await page
+    .getByRole("alert")
+    .getByText(
+      "Outcome unknown. Stop may have been accepted for Guarded Agent. Select Refresh before trying again.",
+    )
+    .waitFor();
+  assert.equal(await stop.isDisabled(), true);
+  assert.equal(await remove.isDisabled(), true);
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  await page.getByRole("alert").waitFor({ state: "detached" });
+  assert.equal(await stop.isDisabled(), false);
+  assert.equal((await fixture.request("GET", agentPath)).data.desiredRuntimeState, "running");
+
+  await stop.click();
+  await page
+    .getByRole("dialog", { name: "Stop Guarded Agent?" })
+    .getByRole("button", { name: "Stop Agent" })
+    .click();
+  await row.getByText("Stop requested", { exact: true }).waitFor();
+  assert.equal((await fixture.request("GET", agentPath)).data.desiredRuntimeState, "stopped");
 });

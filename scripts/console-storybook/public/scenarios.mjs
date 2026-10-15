@@ -644,7 +644,7 @@ export const scenarios = {
     group: "Pages/Agents",
     name: "Populated",
     description:
-      "Searchable Agent table with draft and deployed Agents. Open an Agent to explore its tabs. The shared shell, table, and controls use the Claw palette and typography.",
+      "Searchable Agent table with draft and deployed Agents, each with Stop and Delete row icons. Open an Agent to explore its tabs. The shared shell, table, and controls use the Claw palette and typography.",
     steps: [
       "Check text, search input, buttons, and the current navigation item. The console stays light with either system appearance preference.",
       "Tab through the search and creation controls, then search for an Agent and open its detail page.",
@@ -778,6 +778,86 @@ export const scenarios = {
       "Open Research assistant and select Create new version. Its saved settings show a repair banner without editing or deployment controls.",
       "Select v1 to inspect the readable admitted snapshot. Return to Agents and open Documentation assistant to check that its draft remains editable.",
     ],
+  },
+  agentsRowStopConfirm: {
+    group: "Pages/Agents",
+    name: "Stop from the list",
+    deployed: true,
+    actions: [{ selector: '[aria-label="Stop Research assistant"]', click: true }],
+    description:
+      "The row's Stop icon opens the same confirmation as Agent detail. Cancel returns focus to the icon without a write; Stop Agent requests the stopped state.",
+    steps: [
+      "Cancel the dialog and check focus returns to the Stop icon.",
+      "Open it again and select Stop Agent. The row shows Stop requested, its Stop icon is disabled, and the list stays open.",
+      "Documentation assistant has never been deployed, so its Stop icon starts disabled.",
+    ],
+    gap: "The fixture records the requested state only. Live runtime shutdown is not simulated.",
+  },
+  agentsRowStopped: {
+    group: "Pages/Agents",
+    name: "Stop requested from the list",
+    deployed: true,
+    actions: [
+      { selector: '[aria-label="Stop Research assistant"]', click: true },
+      { selector: ".agent-stop-dialog button.danger", click: true },
+    ],
+    description:
+      "An accepted row Stop shows a status notice, a Stop requested badge, and a disabled Stop icon. Delete stays available.",
+  },
+  agentsRowDeleteConfirm: {
+    group: "Pages/Agents",
+    name: "Delete from the list",
+    deployed: true,
+    actions: [{ selector: '[aria-label="Delete Research assistant"]', click: true }],
+    description:
+      "The row's Delete icon opens the permanent-deletion confirmation, including the commands that remove the kept Configuration and model Secret.",
+    steps: [
+      "Select Permanently delete Agent. The row shows Deleting and both icons are disabled.",
+      "Select Refresh: the row still shows Deleting, because the list keeps an Agent until its cleanup finishes.",
+    ],
+    gap: "The fixture does not run cleanup. Open the Agent to follow deletion status.",
+  },
+  agentsRowStopDenied: {
+    group: "Pages/Agents",
+    name: "Stop from the list denied",
+    deployed: true,
+    rules: [{ suffix: "/stop", method: "POST", status: 403 }],
+    actions: [
+      { selector: '[aria-label="Stop Research assistant"]', click: true },
+      { selector: ".agent-stop-dialog button.danger", click: true },
+    ],
+    description:
+      "A denied row Stop names the missing Agent operate access. The row stays running and its actions stay available.",
+  },
+  agentsRowDeleteDenied: {
+    group: "Pages/Agents",
+    name: "Delete from the list denied",
+    deployed: true,
+    rules: [
+      {
+        path: "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001",
+        method: "DELETE",
+        status: 403,
+      },
+    ],
+    actions: [
+      { selector: '[aria-label="Delete Research assistant"]', click: true },
+      { selector: ".agent-delete-dialog button.danger", click: true },
+    ],
+    description:
+      "A denied row deletion names the missing Agent delete access and leaves the Agent in the list.",
+  },
+  agentsRowStopUnknown: {
+    group: "Pages/Agents",
+    name: "Stop from the list outcome unknown",
+    deployed: true,
+    rules: [{ suffix: "/stop", method: "POST", status: 503, once: true }],
+    actions: [
+      { selector: '[aria-label="Stop Research assistant"]', click: true },
+      { selector: ".agent-stop-dialog button.danger", click: true },
+    ],
+    description:
+      "An unconfirmed row Stop disables that row's actions until Refresh rereads the list. The console never resends the request.",
   },
   agentsSearch: {
     group: "Pages/Agents",

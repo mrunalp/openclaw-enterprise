@@ -1,7 +1,7 @@
 ---
 created: 2026-09-09
 updated: 2026-10-15
-last_updated_session: authoring-run/6d9b833d-e4fc-4f58-98a8-f0fac29f709d
+last_updated_session: authoring-run/ec250085-6194-47f8-afe8-37bcf489e158
 ---
 
 # Console Agent editing and runtime requests
@@ -14,7 +14,7 @@ from exact Agent selection through API response or confirmed deletion. See the
 
 ## Entry Points
 
-- `apps/controller/src/console/agents/detail.mjs:renderAgentDetail` loads the exact Agent and composes the detail actions.
+- `apps/controller/src/console/agents/detail.mjs:renderAgentDetail` loads the exact Agent and composes the detail actions; Agents list rows also offer Stop and Delete.
 - `apps/controller/src/console/agents/credentials.mjs:createChannelSecretsPanel` saves channel Secret bindings.
 - `packages/occ/src/index.ts:OpenClawController.deployAgent` admits a revision after first-deployment credential setup.
 - A signed-in caller must hold each action's permission on the exact resource.
@@ -33,6 +33,8 @@ graph TD
     B --> D["Read or write workspace files"]
     B --> E["Confirm Agent deletion"]
     B --> S["Confirm Agent stop"]
+    L["Agents list row icon"] --> E
+    L --> S
   end
   subgraph API["Controller API"]
     C --> F["Authorize exact request"]
@@ -303,23 +305,24 @@ reference covers worker shutdown and preservation of revisions, credentials, and
 `apps/controller/src/console/agents/deletion.mjs:createAgentDeletion`
 
 **Delete Agent** requests confirmation before sending a bodyless `DELETE` to the
-exact Agent URL. The controller requires Agent `delete`; a `403` stays visible on
-the detail page. An accepted request starts asynchronous cleanup and leaves the
-detail page in a deleting state. The page rereads the exact Agent every few
-seconds until it is gone; **Refresh deletion status** reads it on demand, and
-a read error stops the polling. Only a not-found read after
-an accepted or uncertain request, or when an already-deleting Agent is opened,
-returns to the Agents list in the selected Namespace. An already deleting Agent
-keeps **Request deletion again** beside Refresh. It opens a cancel-first confirmation
-and sends the same bodyless DELETE only when the reader confirms. Queued or claimed
-work stays unchanged; terminal work can restart under the controller's existing
-current-permission and retry-ownership checks. The view does not infer a worker
-outcome from the Agent's deleting state or add a separate status contract.
+exact Agent URL. The controller requires Agent `delete`; a `403` stays visible.
+An accepted request leaves the detail page deleting and rereads the exact Agent
+every few seconds; **Refresh deletion status** reads on demand, and a read error
+stops polling. Only a not-found read after an accepted or uncertain request, or
+when an already-deleting Agent is opened, returns to the Agents list. An already
+deleting Agent keeps **Request deletion again** beside Refresh; its cancel-first
+confirmation sends the same DELETE. Queued or claimed work stays unchanged;
+terminal work can restart under the controller's current-permission and
+retry-ownership checks. The view infers no worker outcome from the deleting state.
 
 An uncertain initial or repeated deletion blocks writes until a successful exact
-Agent read. A deleting read clears that guard even when the view was already deleting;
-a failed read does not. Cancel returns focus to the repeat-request button, and
-successful writes retain status refresh. The browser never retries DELETE automatically.
+Agent read; a deleting read clears that guard, a failed read does not. Cancel
+returns focus to the repeat-request button. The browser never retries DELETE automatically.
+
+`apps/controller/src/console/agents/collection.mjs:renderAgentList` row icons
+send the same Stop and Delete requests after the shared confirmations. An
+accepted response replaces the row; the list does not poll. A `404`, `409`, or
+unconfirmed outcome disables the row's icons until **Refresh**.
 
 `packages/occ/src/index.ts:deleteAgent` owns deletion admission. The
 [Agent deletion reference](../../reference/agents.md#deletion) covers
@@ -358,6 +361,7 @@ worker cleanup and the Namespace-owned resources it preserves.
 
 ## Changelog
 
+- 2026-10-15 23:37: Trace Stop and Delete from Agents list rows in the accompanying change. (authoring-run/ec250085-6194-47f8-afe8-37bcf489e158 - e03429ce3d889b0ac07fedad801aacacc3498a6a)
 - 2026-10-15 21:30: Separate selected version, recorded deployment, and live-serving uncertainty; surface failed-version recovery. (authoring-run/6d9b833d-e4fc-4f58-98a8-f0fac29f709d - 7adac57cc03545bdd3cdc383c88219396a677fd9)
 - 2026-10-15 04:40: Hide stop controls for a never-deployed Agent in the accompanying change. (authoring-run/2aecf15b-82ac-4724-94d9-45b8c1c99fc6 - c78f96b706ce94dbfe6aadfdac9c40e7e7e759ae)
 - 2026-10-10 20:00: Keep untouched CRLF workspace files clean; only an edit enables Save. (public-pr/2000 - a3ca862c37d05ba850d3c9595e5668917d7f480d)
