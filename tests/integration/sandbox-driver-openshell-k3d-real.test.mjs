@@ -1708,13 +1708,14 @@ function createIntegrationSandboxDriverFactory(
       capability: "sandbox",
       implementation: selection.implementation,
       facets: Object.freeze(["networking", "filesystem", "process"]),
-      configureAgent(configuration, harness) {
-        // Configuration admission performs no gateway I/O.
+      configureAgent(configuration, harness, credentialSourceLoginMode) {
+        // Configuration admission performs no gateway I/O. The admitted login mode selects
+        // Codex isolation, so it must reach the real Driver.
         return new OpenShellSandboxDriver(selection.configuration, {
           id: selection.id,
           implementation: "openshell",
           backend: backendFor(undefined),
-        }).configureAgent(configuration, harness);
+        }).configureAgent(configuration, harness, credentialSourceLoginMode);
       },
       harnessResource(context) {
         // The bridge provisions through the real Driver, so its Sandbox identity is the same.
