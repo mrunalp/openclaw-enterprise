@@ -25,9 +25,9 @@ import {
   GENERIC_CONFLICT,
   GENERIC_DENIAL,
   NAMESPACE_NOT_READY_MESSAGE,
-  SUPERSEDED_DEPLOYMENT_NOTE,
+  NEUTRAL_DEPLOYMENT_NOTES,
   deploymentOutcome,
-  supersededDeployment,
+  neutralDeploymentOutcome,
 } from "./list.mjs";
 import {
   createChannelSecretsPanel,
@@ -135,31 +135,16 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-// Next steps for failure codes whose cause the operator can act on directly, and the
-// page that holds the setting to change. Model-probe codes come from the runtime
-// wrapper's startup model check (`runtime-entrypoints.ts`). OpenClaw classifies
-// transport errors (refused connection, DNS failure, "fetch failed") as a timeout, so
-// there an unreachable provider reports RUNTIME_MODEL_PROBE_TIMEOUT; Codex reports the
-// same failure as RUNTIME_MODEL_PROBE_FAILED unless the connection hangs until its cap.
-const DEPLOYMENT_FAILURE_GUIDANCE = {
-  RUNTIME_AUTHENTICATION_FAILED: {
-    text: "The model provider rejected this version's credential (HTTP 401 or 403). Check that the key is valid and can use the selected model, update or replace the model credential Secret, then deploy a new version.",
-    link: "credentials",
-  },
-  RUNTIME_MODEL_PROBE_FAILED: {
-    text: "The startup model check failed for a reason other than a rejected credential, such as an unknown model, invalid provider settings, a provider or TLS error, a rate limit or quota, or, with Codex, a provider the runtime cannot reach. Check the model and its provider settings (such as baseUrl and api) in the Configuration, the provider account, and that the runtime can reach the provider, then deploy a new version.",
-    link: "configuration",
-  },
-  RUNTIME_MODEL_PROBE_TIMEOUT: {
-    text: "The startup model check did not get a reply from the model provider in time. With OpenClaw this includes a provider the runtime cannot reach (refused connection or unknown host). Check that the runtime can reach the provider (network egress, proxy, or a custom baseUrl in the Configuration) and that the provider is responding, then deploy a new version.",
-    link: "configuration",
-  },
+// The page that holds the setting to change for failure codes whose cause the operator can
+// act on directly. The API's error message already states the next step (finding 1393), so
+// the console adds only the link.
+const DEPLOYMENT_FAILURE_LINKS = {
+  RUNTIME_AUTHENTICATION_FAILED: "credentials",
+  RUNTIME_MODEL_PROBE_FAILED: "configuration",
+  RUNTIME_MODEL_PROBE_TIMEOUT: "configuration",
   // Kubernetes Compute fails activation at once when the Gateway refuses its own in-Pod
   // CLI (#1128); the Configuration's gateway password reference is what lets it in.
-  AGENT_GATEWAY_UNAUTHORIZED: {
-    text: "The Agent Gateway refused its own in-Pod CLI, so the version never finished starting. In the Configuration, select Enable gateway password access if it is not already enabled, save, then deploy a new version.",
-    link: "configuration",
-  },
+  AGENT_GATEWAY_UNAUTHORIZED: "configuration",
 };
 
 // The runtime classifies a failed startup model check into one of these kinds and
@@ -200,23 +185,19 @@ function deploymentFailure(error, hrefs = {}, logsLink = null) {
   }
   const runtimeFailure = error.data?.runtimeFailure;
   const preparation = error.data?.preparation;
-  const guidance = Object.hasOwn(DEPLOYMENT_FAILURE_GUIDANCE, error.code)
-    ? DEPLOYMENT_FAILURE_GUIDANCE[error.code]
+  const guidanceLink = Object.hasOwn(DEPLOYMENT_FAILURE_LINKS, error.code)
+    ? DEPLOYMENT_FAILURE_LINKS[error.code]
     : null;
-  const guidanceHref = guidance ? (hrefs[guidance.link] ?? null) : null;
+  const guidanceHref = guidanceLink ? (hrefs[guidanceLink] ?? null) : null;
   return element(
     "div",
     {},
     element("p", { className: "error", role: "alert" }, `${error.code}: ${error.message}`),
-    guidance
+    guidanceHref
       ? element(
           "p",
           { className: "hint deployment-failure-guidance" },
-          guidance.text,
-          guidanceHref ? " " : null,
-          guidanceHref
-            ? element("a", { href: guidanceHref }, DEPLOYMENT_FAILURE_LINK_LABELS[guidance.link])
-            : null,
+          element("a", { href: guidanceHref }, DEPLOYMENT_FAILURE_LINK_LABELS[guidanceLink]),
         )
       : null,
     preparation
@@ -287,13 +268,22 @@ function deploymentFailure(error, hrefs = {}, logsLink = null) {
   );
 }
 
-// A recorded result: the failure, or a neutral note when a newer version superseded this one.
+// A recorded result: the failure, or a neutral note when a newer version superseded this one
+// or the owner stopped the Agent during its deployment.
 function deploymentResult(record, hrefs = {}, logsLink = null) {
-  if (supersededDeployment(record)) {
+  const neutral = neutralDeploymentOutcome(record);
+  if (neutral === "superseded") {
     return element(
       "p",
       { className: "muted deployment-superseded" },
-      `${SUPERSEDED_DEPLOYMENT_NOTE} before this one became current (${record.error.code}). This version did not fail; no action is needed.`,
+      `${NEUTRAL_DEPLOYMENT_NOTES.superseded} before this one became current (${record.error.code}). This version did not fail; no action is needed.`,
+    );
+  }
+  if (neutral === "stopped") {
+    return element(
+      "p",
+      { className: "muted deployment-stopped" },
+      `The Agent was stopped before this deployment finished (${record.error.code}). This version did not fail; deploy a new version when you want it running.`,
     );
   }
   return deploymentFailure(record.error, hrefs, logsLink);
@@ -309,6 +299,7 @@ function deploymentProgress(record) {
     running: "A worker claim is active.",
     failed: "Deployment work failed; check the recorded error and current version.",
     superseded: "Deployment work stopped because a newer version superseded this one.",
+    stopped: "Deployment work ended because the Agent was stopped.",
     succeeded: "Work completed or the version was already active.",
   };
   const stages = [
@@ -322,8 +313,8 @@ function deploymentProgress(record) {
           ? "active"
           : status === "succeeded"
             ? "complete"
-            : status === "superseded"
-              ? "superseded"
+            : status === "superseded" || status === "stopped"
+              ? status
               : "failed",
     ],
     [
@@ -332,10 +323,16 @@ function deploymentProgress(record) {
         ? "This deployment completed activation or was already active."
         : status === "superseded"
           ? "Not needed: this version did not become current."
-          : status === "failed"
-            ? "Successful completion was not recorded for this deployment."
-            : "Successful completion is not recorded yet.",
-      status === "succeeded" ? "complete" : status === "superseded" ? "superseded" : "waiting",
+          : status === "stopped"
+            ? "Not recorded: the Agent was stopped first. Deploy a new version when you want it running."
+            : status === "failed"
+              ? "Successful completion was not recorded for this deployment."
+              : "Successful completion is not recorded yet.",
+      status === "succeeded"
+        ? "complete"
+        : status === "superseded" || status === "stopped"
+          ? status
+          : "waiting",
     ],
   ];
   return element(
@@ -778,7 +775,7 @@ function createVersionDiagnosticsPanel(context, path, revisionId, recordedStatus
     );
     const recorded = recordedStatus();
     const failure =
-      recorded?.status === "failed" && !supersededDeployment(recorded) ? recorded.error : null;
+      recorded?.status === "failed" && !neutralDeploymentOutcome(recorded) ? recorded.error : null;
     const hints = [];
     if (unreachable) {
       hints.push(
@@ -1368,12 +1365,16 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       succeeded: "Succeeded",
       failed: "Failed",
       superseded: "Superseded",
+      stopped: "Stopped",
     }[latestDeploymentStatus];
-    // A superseded deployment is neutral: it raises no banner and says nothing about serving.
-    const superseded = latestDeploymentStatus === "superseded";
+    // A superseded or stopped deployment is neutral: it raises no banner and says nothing about
+    // serving.
+    const neutral = latestDeploymentStatus === "superseded" || latestDeploymentStatus === "stopped";
     latestDeploymentValue.textContent = `v${latest.revision} · ${label ?? (latestDeploymentError ? "Unavailable" : "Loading…")}`;
-    latestDeploymentNote.textContent = superseded
-      ? `${SUPERSEDED_DEPLOYMENT_NOTE}.`
+    latestDeploymentNote.textContent = neutral
+      ? latestDeploymentStatus === "stopped"
+        ? `${NEUTRAL_DEPLOYMENT_NOTES.stopped}. Deploy a new version when you want it running.`
+        : `${NEUTRAL_DEPLOYMENT_NOTES.superseded}.`
       : latestDeploymentStatus
         ? `Recorded status: ${latestDeploymentStatus}`
         : latestDeploymentError
@@ -1412,7 +1413,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       liveServingValue.textContent = "Not verified";
       liveServingNote.textContent = "Serving version and model access are unknown.";
     }
-    statusLine.hidden = (!latestDeploymentStatus || superseded) && !requestedHidden;
+    statusLine.hidden = (!latestDeploymentStatus || neutral) && !requestedHidden;
     if (requestedHidden || newerHidden) {
       statusLine.textContent = [
         requestedHidden
@@ -1429,7 +1430,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       statusLine.textContent = `v${latest.revision} deployment failed. ${currentLabel} is still recorded as current, but deploying a dedicated Agent stops the previous version first, so this Agent is probably not serving: expect no answers in its channels or anywhere else until a new version deploys. Fix the failure, then deploy a new version.`;
     } else if (selectedFailed) {
       statusLine.textContent = `${currentLabel} deployment failed. ${currentLabel} is still selected because its runtime already replaced the previous version, so this Agent is probably not serving: expect no answers in its channels or anywhere else until a new version deploys. Fix the failure, then deploy a new version.`;
-    } else if (latestDeploymentStatus && !superseded) {
+    } else if (latestDeploymentStatus && !neutral) {
       const selection = currentRevisionId
         ? `${currentLabel} is selected.`
         : "No version is selected.";
@@ -1510,6 +1511,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     const revisions = [...listedRevisions.values()].sort((a, b) => b.revision - a.revision);
     visibleRevisions = revisions;
     visibleRevisionsLoaded = revisionResult.status === "fulfilled";
+    stopPanel.setNoReadableVersions(visibleRevisionsLoaded ? revisions.length === 0 : null);
     renderCurrentVersion();
     renderVersions(
       revisions,
@@ -1522,6 +1524,17 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       latestDeploymentRecord = null;
       latestDeploymentError = false;
       latestDeploymentErrorCode = null;
+      // On first load the newest version's panel replaces the loading placeholder once its
+      // first status read settles, in the same frame as the summary and status line, so the
+      // page below moves once instead of once for an empty panel and again for the status.
+      // A newer version found later replaces the shown (older) panel at once.
+      const firstLoad = activityPanel === deploymentStatus;
+      const showPanel = (panel) => {
+        if (activityPanel !== panel) {
+          activityPanel.replaceWith(panel);
+          activityPanel = panel;
+        }
+      };
       const nextPanel = mostRecent
         ? createDeploymentStatusPanel(
             context,
@@ -1533,6 +1546,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
               if (activityRevisionId !== mostRecent.id) {
                 return;
               }
+              showPanel(nextPanel);
               latestDeploymentStatus = status;
               latestDeploymentError = unavailable;
               latestDeploymentErrorCode = errorCode;
@@ -1566,8 +1580,9 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
                 : "No readable deployment records.",
             ),
           );
-      activityPanel.replaceWith(nextPanel);
-      activityPanel = nextPanel;
+      if (!mostRecent || !firstLoad) {
+        showPanel(nextPanel);
+      }
       activityRevisionId = mostRecent?.id ?? null;
     }
     renderLatestDeployment();

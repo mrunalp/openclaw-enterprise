@@ -17,10 +17,15 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
     needsRefresh: false,
     notice: "",
     error: null,
+    // Whether the version list loaded with no version this viewer can read: undefined while it
+    // loads, null when it failed.
+    noReadableVersions: undefined,
   };
 
+  // Focus lands here when the control that would take it is not rendered.
+  const title = element("h2", { id: "agent-stop-title", tabindex: "-1" }, "Stop Agent");
   section.append(
-    element("h2", { id: "agent-stop-title" }, "Stop Agent"),
+    title,
     element(
       "p",
       { className: "muted" },
@@ -79,11 +84,29 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
     repeat.disabled = state.pending || state.needsRefresh;
     refresh.disabled = state.pending;
     refresh.textContent = state.pending ? "Checking…" : "Refresh stop status";
-    if (requested || state.needsRefresh) {
+    // An Agent created through the API starts stopped and has no version until its first
+    // deploy, so there is nothing to stop or to check (finding 1394). Only what this viewer
+    // can read decides it: a member who reads no version of a deployed Agent sees the same.
+    // While the version list loads, no controls flash in only to disappear.
+    const neverStarted =
+      requested &&
+      !state.agent.activeRevisionId &&
+      (state.noReadableVersions === true || state.noReadableVersions === undefined) &&
+      !state.pending &&
+      !state.needsRefresh;
+    if (neverStarted) {
+      actions.replaceChildren();
+    } else if (requested || state.needsRefresh) {
       actions.replaceChildren(stop, ...(requested ? [repeat] : []), refresh);
     } else {
       actions.replaceChildren(stop);
     }
+  }
+
+  function focusStatusControl() {
+    const target =
+      state.needsRefresh || state.agent.desiredRuntimeState === "stopped" ? refresh : stop;
+    (target.isConnected ? target : title).focus();
   }
 
   function setAgent(next) {
@@ -103,9 +126,15 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
     if (state.pending || !context.isCurrent()) {
       return;
     }
+    // Disabling Refresh can drop focus to the page. Return it only if the operator stayed here.
+    let returnFocus = document.activeElement === refresh;
+    const focusMoved = () => {
+      returnFocus = false;
+    };
     state.pending = true;
     state.error = null;
     render();
+    document.addEventListener("focusin", focusMoved, { once: true });
     try {
       const current = await context.request(path);
       if (!context.isCurrent()) {
@@ -135,13 +164,13 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
         };
       }
     } finally {
+      document.removeEventListener("focusin", focusMoved);
       if (context.isCurrent()) {
         state.pending = false;
         render();
-        (state.needsRefresh || state.agent.desiredRuntimeState === "stopped"
-          ? refresh
-          : stop
-        ).focus();
+        if (returnFocus) {
+          focusStatusControl();
+        }
       }
     }
   }
@@ -205,10 +234,7 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
       if (context.isCurrent()) {
         state.pending = false;
         render();
-        (state.needsRefresh || state.agent.desiredRuntimeState === "stopped"
-          ? refresh
-          : stop
-        ).focus();
+        focusStatusControl();
       }
     }
   }
@@ -255,10 +281,7 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
           if (invoker.isConnected && !invoker.disabled) {
             invoker.focus();
           } else {
-            (state.needsRefresh || state.agent.desiredRuntimeState === "stopped"
-              ? refresh
-              : stop
-            ).focus();
+            focusStatusControl();
           }
         }
       },
@@ -272,6 +295,15 @@ export function createAgentStop(context, path, agent, onDeleting, onAgentChanged
   render();
   return {
     section,
+    // The detail page reports whether its version list loaded empty (true), loaded with
+    // versions (false), or failed (null).
+    setNoReadableVersions(value) {
+      if (state.noReadableVersions === value) {
+        return;
+      }
+      state.noReadableVersions = value;
+      render();
+    },
     updateAgent(next) {
       if (state.pending) {
         return;

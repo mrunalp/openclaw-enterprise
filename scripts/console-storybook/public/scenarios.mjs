@@ -1528,6 +1528,33 @@ export const scenarios = {
       "Open the existing Agent link; confirm the form offers no retry that would create another Agent.",
     ],
   },
+  createProvisioningStopped: {
+    group: "Pages/Create Agent",
+    name: "Stopped before the first deployment",
+    path: create,
+    actions: readyForm,
+    provisioningCancelledByStop: true,
+    description:
+      "Someone stopped the new Agent before its first version was admitted. Provisioning is cancelled, but the stopped Agent keeps its name, so the page links it instead of offering a new Agent.",
+    steps: [
+      "Click Create Agent and wait for the cancelled provisioning.",
+      "Confirm the page says Provisioning stopped, asks for no new Agent, and links the kept Agent.",
+    ],
+  },
+  createDeploymentStopped: {
+    group: "Pages/Create Agent",
+    name: "Initial deployment stopped",
+    path: create,
+    actions: readyForm,
+    provisionedDeploymentStatus: "failed",
+    provisionedDeploymentStopped: true,
+    description:
+      "Someone stopped the new Agent while its first deployment was rolling out. The request names the stop and asks for no repair.",
+    steps: [
+      "Click Create Agent and wait for the stopped first deployment.",
+      "Confirm the message names the stop without asking to correct a cause, and open the existing Agent link.",
+    ],
+  },
   createUnsupportedProvisioning: {
     group: "Pages/Create Agent",
     name: "Unsupported provisioning",
@@ -2266,7 +2293,11 @@ export const scenarios = {
       ...createModelSecret("storybook-anthropic-key"),
     ],
     description:
-      "Anthropic offers only the OpenClaw harness, with Embedded execution. Its fixed model list is available before credential entry and starts without a selection.",
+      "Anthropic offers only the OpenClaw harness, with Embedded execution. Authentication method stays clickable with Anthropic API key as its only option. Its fixed model list is available before credential entry and starts without a selection.",
+    steps: [
+      "Open Authentication method and select Anthropic API key. It remains clickable even though it is the only available method.",
+      "Confirm the selected model credential Secret stays selected after choosing the authentication method.",
+    ],
   },
   createCodexPat: {
     group: "Pages/Create Agent",
@@ -3045,7 +3076,7 @@ export const scenarios = {
     candidateDeploymentStatus: "failed",
     candidateModelProbeCause: { kind: "PROBE_STATUS", detail: "format" },
     description:
-      "v7 failed its startup model check; the record names the runtime's classified cause (the provider rejected the model or request format) beside the Configuration guidance.",
+      "v7 failed its startup model check; the recorded error states the next step, the record names the runtime's classified cause (the provider rejected the model or request format), and Open Configuration links the draft.",
   },
   deploymentFailedAfterSelection: {
     group: "Pages/Agent detail",
@@ -3056,6 +3087,18 @@ export const scenarios = {
     candidateSelected: true,
     description:
       "v7 is selected despite a recorded finalization failure. The timeline reports failure without claiming selection never occurred.",
+  },
+  deploymentStopped: {
+    group: "Pages/Agent detail",
+    name: "Deployment stopped by the owner",
+    path: candidateVersion,
+    deployed: true,
+    stopped: true,
+    candidateDeploymentStatus: "failed",
+    candidateStopped: true,
+    description:
+      "The owner stopped the Agent while v7 was deploying. Latest visible deployment reads v7 · Stopped with neutral stages, no failure banner, and a deploy-again next step.",
+    gap: "The stopped record is simulated UI evidence; it does not verify a live deployment.",
   },
   deploymentSuperseded: {
     group: "Pages/Agent detail",
@@ -3076,6 +3119,25 @@ export const scenarios = {
     candidateDeploymentStatus: "succeeded",
     description:
       "v7 is now selected and its original deployment recorded success. This remains historical evidence, not a live probe.",
+  },
+  deploymentActivityLoading: {
+    group: "Pages/Agent detail",
+    name: "Deployment activity loading",
+    path: candidateVersion,
+    deployed: true,
+    candidateDeploymentStatus: "succeeded",
+    rules: [
+      {
+        prefix:
+          "/namespaces/ns_00000000-0000-4000-8000-000000000001/agents/agt_00000000-0000-4000-8000-000000000001/deployments/",
+        delayMs: 4000,
+      },
+    ],
+    description:
+      "Deployment status reads take 4 s. Deployment activity keeps its loading placeholder until the newest version's status arrives, then shows it in one step.",
+    steps: [
+      "Reload and watch Deployment activity: it shows its loading line until the recorded status arrives, never an empty panel first. The sharing panel and version tabs below move once.",
+    ],
   },
   deploymentUnavailable: {
     group: "Pages/Agent detail",
@@ -4639,6 +4701,11 @@ export const scenarios = {
     path: revision,
     deployed: true,
     stopped: true,
+    rules: [{ suffix: "/agents/agt_00000000-0000-4000-8000-000000000001", skip: 1, delayMs: 1800 }],
+    steps: [
+      "Focus Refresh stop status and press Enter. When Checking finishes, focus returns to Refresh.",
+      "Refresh again, then press Tab while Checking is visible. Focus stays on the control you moved to.",
+    ],
     description:
       "The requested state is stopped with a selected revision. Request Stop again opens confirmation; shutdown completion is not exposed here.",
   },
@@ -4661,6 +4728,13 @@ export const scenarios = {
     stopNoSelection: true,
     description:
       "An absent selected version does not establish candidate cleanup. Explicit repeated Stop remains available; history is readable.",
+  },
+  stopNeverDeployed: {
+    group: "Components/Stop Agent",
+    name: "Never deployed",
+    path: draft,
+    description:
+      "An Agent created without a deploy is stopped with no version, so Stop offers no controls; the panel says to deploy a new version to start it.",
   },
   stopRepeatUnknown: {
     group: "Components/Stop Agent",
