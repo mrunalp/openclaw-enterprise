@@ -44,6 +44,9 @@
   --radius-sm: 6px;
   --radius: 10px;
   --radius-lg: 14px;
+  /* Keep the scrollbar's space whether or not the page scrolls, so the header and content do not
+     move sideways between short and long pages with classic scrollbars (finding 1520). */
+  scrollbar-gutter: stable;
 }
 * {
   box-sizing: border-box;
@@ -151,6 +154,42 @@ p {
   padding: calc(14vh + 28px) 28px;
   color: var(--muted);
   text-align: center;
+  /* A load that settles within the loading delay never flashes its status (finding 1444). Full
+     loads took up to 274 ms, past the 250 ms other statuses wait, so the boot status waits
+     400 ms (finding 1519). Visibility, not opacity: it appears whole, never half-faded. */
+  animation: loading-delay 400ms;
+}
+/* A page held on screen, inert, while a navigation's reads run. Past 300 ms it dims and shows
+   a progress cursor, so a slow return does not look stuck; opacity and cursor only, so nothing
+   moves (finding 1447). A refocus recheck does not set .holding and keeps its look. */
+.content.holding:has(> [aria-live="polite"][inert]) {
+  cursor: progress;
+}
+.content.holding > [aria-live="polite"][inert] {
+  animation: held-busy 200ms ease-out 300ms both;
+}
+@keyframes held-busy {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0.6;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .content.holding > [aria-live="polite"][inert] {
+    animation-duration: 1ms;
+  }
+}
+/* Loading text that appears only if its read outlasts 250 ms (findings 1444, 1449). */
+.delayed-status {
+  animation: loading-delay 250ms;
+}
+@keyframes loading-delay {
+  from,
+  to {
+    visibility: hidden;
+  }
 }
 .auth {
   background: var(--surface);
@@ -419,6 +458,11 @@ p {
   flex-wrap: wrap;
   max-width: 100%;
 }
+.checking-status {
+  margin: 0;
+  padding-block: 10px;
+  color: var(--muted);
+}
 .namespace-selector {
   display: grid;
   gap: 6px;
@@ -518,7 +562,9 @@ p {
 }
 @media (max-width: 760px) {
   .shell {
-    display: block;
+    /* A flow root keeps the menu button's margin inside the shell; collapsing through body,
+       it moved the whole page when the shell replaced the startup status (finding 1413). */
+    display: flow-root;
   }
   .content {
     padding: 30px 20px;
@@ -1152,6 +1198,19 @@ select:not([multiple])[size="1"] {
 .agent-table td {
   vertical-align: top;
 }
+/* A set width and a one-line note, so a landing deployment read neither grows its row nor
+   re-flows the columns (finding 1488). The note adds nothing to the column's width. */
+.agent-table .agent-deployment::before {
+  content: "";
+  display: block;
+  width: 14rem;
+}
+.agent-table .agent-deployment-note {
+  contain: inline-size;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 .agent-table .resource-id {
   display: block;
   margin-top: 7px;
@@ -1195,11 +1254,24 @@ select:not([multiple])[size="1"] {
   width: 34px;
   height: 34px;
 }
+/* Like the deployment cell: a set width and one reserved note line, so permission advice that
+   lands after the first paint neither grows its row nor re-flows the columns. */
+.agent-table .agent-row-actions-cell::before {
+  content: "";
+  display: block;
+  width: 10.5rem;
+}
 .row-action-note {
   display: block;
+  height: 16px;
   margin-top: 6px;
   color: var(--muted);
   font-size: 12px;
+  line-height: 16px;
+  contain: inline-size;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 .agent-list-feedback > .notice,
 .agent-list-feedback > .error {
@@ -2398,6 +2470,16 @@ summary:focus-visible {
   }
 }
 
+/* Held back until the Logs view's first reads settle (finding 1413). */
+.agent-logs-pending > .runtime-strip,
+.agent-logs-pending > .log-viewer {
+  display: none;
+}
+/* The cards below a pending Logs view appear where the shown view puts them (finding 1479). */
+.agent-logs-opening > .stop-note,
+.agent-logs-opening > .deletion-note {
+  visibility: hidden;
+}
 .runtime-strip {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));

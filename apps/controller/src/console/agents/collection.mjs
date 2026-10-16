@@ -92,29 +92,27 @@ export function renderAgentList(context) {
   const permissionReads = new Set();
   const permissions = new Map();
   let restrictOpenDialog = null;
+  // The page renders with the caller's permission answer, so Create Agent is never painted
+  // enabled and then refused, and the note never pushes the table down (finding 1517). Gating
+  // only: the API still authorizes creation, so an unknown answer keeps the control.
+  const createDenied = context.permissions?.agents?.create === false;
   const create = button("Create Agent", () => context.navigate("agents/new"), {
     className: "primary",
   });
-  const createNote = element(
-    "p",
-    { className: "muted", role: "status", hidden: true },
-    "Your access does not include creating Agents in this Namespace.",
-  );
+  create.disabled = createDenied;
   view.replaceChildren(
     element("div", { className: "agent-toolbar" }, search, create),
-    createNote,
+    ...(createDenied
+      ? [
+          element(
+            "p",
+            { className: "muted", role: "status" },
+            "Your access does not include creating Agents in this Namespace.",
+          ),
+        ]
+      : []),
     feedback,
     rows,
-  );
-  // Gating only: the API still authorizes creation, so an unknown answer keeps the control.
-  void context.request(`${namespacePath(context.namespaceId)}/permissions`).then(
-    (permissions) => {
-      if (context.isCurrent() && permissions?.agents?.create === false) {
-        create.disabled = true;
-        createNote.hidden = false;
-      }
-    },
-    () => {},
   );
 
   const agentPath = (id) =>
@@ -388,9 +386,12 @@ export function renderAgentList(context) {
         ...describedBy(!canDelete, item.status === "deleting" ? badgeId : null),
       },
     );
-    const note = restriction
-      ? element("span", { className: "row-action-note", id: noteId }, restriction)
-      : null;
+    // The note's line is reserved from the first paint, so advice that lands later only fills it.
+    const note = element(
+      "span",
+      { className: "row-action-note", id: noteId, ...(restriction ? { title: restriction } : {}) },
+      restriction ?? "",
+    );
     return { stop, delete: remove, note };
   }
 
@@ -419,7 +420,7 @@ export function renderAgentList(context) {
       (kind) => controls[kind] && controls[kind] === document.activeElement,
     );
     const actions = rowActions(item);
-    controls.cell.replaceChildren(...actionCellContent(actions).filter(Boolean));
+    controls.cell.replaceChildren(...actionCellContent(actions));
     Object.assign(controls, actions);
     if (focused) {
       focusRow(id, focused);
@@ -442,7 +443,11 @@ export function renderAgentList(context) {
             {},
             query
               ? "Try another name or ID."
-              : "Create an Agent in this Namespace using an editable Configuration template.",
+              : createDenied
+                ? // Under the note above: say what the reader can expect, not invite creating
+                  // (finding 1521).
+                  "Agents in this Namespace that are shared with you appear here."
+                : "Create an Agent in this Namespace using an editable Configuration template.",
           ),
         ),
       );
@@ -473,9 +478,15 @@ export function renderAgentList(context) {
       readPermissions(item);
       const name = link(item.name, `agents/${item.id}`, context);
       const actions = rowActions(item);
-      const cell = element("td", {}, ...actionCellContent(actions));
+      const cell = element(
+        "td",
+        { className: "agent-row-actions-cell" },
+        ...actionCellContent(actions),
+      );
       rowControls.set(item.id, { name, cell, ...actions });
-      const deployment = element("td", {}, "Reading deployment…");
+      // The cell keeps its column's width once its read lands, and its outcome link and one
+      // note line fit the two lines the Agent cell already gives the row (finding 1488).
+      const deployment = element("td", { className: "agent-deployment" }, "Reading deployment…");
       if (!deployments.has(item.id)) {
         deployments.set(
           item.id,
@@ -511,25 +522,21 @@ export function renderAgentList(context) {
             ),
           );
           const neutral = neutralDeploymentOutcome(result.status);
-          if (neutral) {
-            deployment.append(
-              element(
-                "span",
-                { className: "resource-id" },
-                `${NEUTRAL_DEPLOYMENT_NOTES[neutral]}.`,
-              ),
-            );
-          } else if (result.status.status === "failed") {
-            deployment.append(
-              element(
-                "span",
-                { className: "resource-id" },
-                result.status.error?.message ?? "Deployment failed.",
-              ),
-            );
-          }
+          const failure =
+            !neutral && result.status.status === "failed"
+              ? (result.status.error?.message ?? "Deployment failed.")
+              : null;
+          // A long failure fits one line; its title and the Agent page give the whole text.
           deployment.append(
-            element("span", { className: "resource-id" }, "Serving health unverified"),
+            element(
+              "span",
+              {
+                className: "resource-id agent-deployment-note",
+                ...(failure ? { title: failure } : {}),
+              },
+              failure ??
+                (neutral ? `${NEUTRAL_DEPLOYMENT_NOTES[neutral]}.` : "Serving health unverified"),
+            ),
           );
         })
         .catch((error) => {
