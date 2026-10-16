@@ -38,7 +38,7 @@ import {
   hasRequiredChannelCredentials,
   channelCredentialBlockReason,
 } from "./credentials.mjs";
-import { ensureSecretOperateBinding } from "./secret-access.mjs";
+import { ensureCredentialOperateBinding } from "./credential-access.mjs";
 
 // One page of revision summaries, newest first (finding 1323). Summaries carry no saved
 // settings; read the exact revision for those.
@@ -872,8 +872,8 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     return;
   }
   context.setTitle(agent.name);
-  // A missing summary leaves each control on its usual path, except the failed-version
-  // recovery's draft link, which needs update (finding 1478). The API authorizes the actual request.
+  // A missing summary leaves each control on its usual path, except failed-version
+  // recovery, which waits for a positive answer before offering a draft link.
   let callerPermissions = null;
   let callerPermissionsSettled = false;
   const callerPermissionsRead = request(`${path}/permissions`)
@@ -888,8 +888,15 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   // Configuration saves have no bit in this answer and stay enabled (finding 1530). A draft
   // refresh reads the answer again, so a grant applies without a page Refresh (finding 1538).
   let agentUpdateAllowed = callerPermissionsRead.then((permissions) => permissions?.update);
-  // Only the latest draft refresh's answer replaces the summary.
+  // Only the latest reread's answer replaces the summary.
   let permissionsRereads = 0;
+  // The newest permission read. Logs compares a remembered status denial with it, so an
+  // operate grant read since the page was built applies (finding 1579).
+  let latestPermissionsRead = callerPermissionsRead;
+  let permissionsReadSettled = false;
+  void callerPermissionsRead.then(() => {
+    permissionsReadSettled = latestPermissionsRead === callerPermissionsRead;
+  });
   let deleting = agent.status === "deleting";
   let currentRevisionId = agent.activeRevisionId;
   // The Agent as last read; Stop and finished deployments update it in place.
@@ -1156,14 +1163,27 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
   const revealed = new Promise((resolve) => {
     markRevealed = resolve;
   });
-  function revealDetail() {
+  // A Logs entry that scrolls to its output also waits for that output (within the same bound)
+  // and scrolls in the frame that reveals the page, never at the top first (finding 1552).
+  let revealHold = null;
+  let scrollOnReveal = null;
+  function showDetail() {
     clearTimeout(revealTimer);
     view.classList.remove("agent-detail-pending");
     // An Agent opened from the list shows this page in place of the list only now (finding 1516).
     context.revealed?.();
+    scrollOnReveal?.();
     markRevealed();
   }
-  revealTimer = setTimeout(revealDetail, FIRST_ACTIVITY_WAIT_MS);
+  // The overview's first reads settled.
+  function revealDetail() {
+    if (revealHold) {
+      void revealHold.then(showDetail);
+    } else {
+      showDetail();
+    }
+  }
+  revealTimer = setTimeout(showDetail, FIRST_ACTIVITY_WAIT_MS);
   function revealSelectedTab() {
     const strip = tabs.getBoundingClientRect();
     const bounds = tabControls.get(selectedTab).getBoundingClientRect();
@@ -1628,8 +1648,15 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       const logsAllowed =
         !logTextDenied(context, agentId) &&
         !context.deniedReads?.has(`${path}/revisions/${encodeURIComponent(latest.id)}`);
-      // Only an answer that allows update offers the draft; a failed answer offers none.
-      const draftAllowed = callerPermissions?.update === true;
+      // Agent permissions can support opening a draft; they do not grant Configuration access.
+      const configurationId = currentAgent.configurationId;
+      const configurationAvailable =
+        typeof configurationId === "string" &&
+        configurationId.length > 0 &&
+        !currentAgent.configurationReadError &&
+        !context.deniedReads?.has(
+          `${namespacePath(namespaceId)}/configurations/${encodeURIComponent(configurationId)}`,
+        );
       let impact = logsAllowed
         ? "Check the failed version’s logs before deploying a new version."
         : "Ask someone with log access to check the failed version’s logs before deploying a new version.";
@@ -1646,19 +1673,26 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       const guidance = Object.hasOwn(DEPLOYMENT_FAILURE_LINKS, code)
         ? DEPLOYMENT_FAILURE_LINKS[code]
         : null;
-      const tab =
-        !draftAllowed || (guidance === "credentials" && agent.harnessAuth?.method === "runtime")
-          ? null
-          : guidance;
-      const actionsFor = `${latest.id}/${tab}/${logsAllowed}`;
+      const canOpenConfiguration =
+        guidance === "configuration" &&
+        configurationAvailable &&
+        (callerPermissions?.update === true || callerPermissions?.deploy === true);
+      const canOpenCredentials =
+        guidance === "credentials" &&
+        callerPermissions?.update === true &&
+        currentAgent.harnessAuth?.method !== "runtime";
+      const tab = canOpenConfiguration || canOpenCredentials ? guidance : null;
+      const nextLabel =
+        canOpenConfiguration && callerPermissions?.update !== true
+          ? "Open version draft"
+          : DEPLOYMENT_FAILURE_LINK_LABELS[tab];
+      const actionsFor = `${latest.id}/${tab}/${nextLabel}/${logsAllowed}`;
       if (recoveryTarget !== actionsFor) {
         recoveryTarget = actionsFor;
         const logs = logsAllowed
           ? link(`Open ${version} Logs`, target(latest.id, "logs"), context)
           : null;
-        const next = tab
-          ? link(DEPLOYMENT_FAILURE_LINK_LABELS[tab], target("draft", tab), context)
-          : null;
+        const next = tab ? link(nextLabel, target("draft", tab), context) : null;
         const actions = [logs, next].filter(Boolean);
         if (actions.length) {
           actions[0].className = "overview-primary";
@@ -2381,23 +2415,38 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
     }
   }
 
+  // Reads the caller's permission answer again; a failed read keeps the last answer.
+  function rereadPermissions() {
+    const previous = latestPermissionsRead;
+    const reread = ++permissionsRereads;
+    const read = request(`${path}/permissions`).then(
+      (permissions) => {
+        if (context.isCurrent() && reread === permissionsRereads) {
+          callerPermissions = permissions;
+          if (latestDeploymentStatus === "failed" && !deleting) {
+            renderLatestDeployment();
+          }
+        }
+        return permissions;
+      },
+      () => previous,
+    );
+    latestPermissionsRead = read;
+    permissionsReadSettled = false;
+    const settle = () => {
+      permissionsReadSettled = latestPermissionsRead === read;
+    };
+    void read.then(settle, settle);
+    return read;
+  }
+
   async function refreshDraft(freshAgent, saved, focus) {
     if (freshAgent) {
       agent = freshAgent;
       updateCurrentAgent(freshAgent, latestRevisionResult, viewedSnapshot);
     }
-    // The rebuilt editors take the fresh answer; a failed read keeps the last one.
-    const previousUpdateAllowed = agentUpdateAllowed;
-    const reread = ++permissionsRereads;
-    agentUpdateAllowed = request(`${path}/permissions`).then(
-      (permissions) => {
-        if (context.isCurrent() && reread === permissionsRereads) {
-          callerPermissions = permissions;
-        }
-        return permissions?.update;
-      },
-      () => previousUpdateAllowed,
-    );
+    // The rebuilt editors take the fresh answer.
+    agentUpdateAllowed = rereadPermissions().then((permissions) => permissions?.update);
     const next = loadDetails();
     const data = await next;
     if (!context.isCurrent() || deleting || !data) {
@@ -2547,6 +2596,10 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
         agent,
         revisionId: selected,
         shown: revealed,
+        // A rebuilt view asks for a fresh answer when it remembers a status denial; a read
+        // still in flight is that answer.
+        permissions: ({ fresh = false } = {}) =>
+          fresh && permissionsReadSettled ? rereadPermissions() : latestPermissionsRead,
         // The failed-version recovery stops offering Logs as soon as they are denied.
         onLogsDenied: () => {
           if (tabContext.isCurrent() && !recovery.hidden) {
@@ -2566,6 +2619,26 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           view.classList.remove("agent-logs-opening");
         }
       });
+      // An address, reload or sign-in landing reveals the page already at the output once it is
+      // ready, rather than at the top and then jumping to it (finding 1552).
+      let scrolledOnReveal = false;
+      if (!activated && view.classList.contains("agent-detail-pending")) {
+        revealHold = Promise.all([details, logs.firstView]).then(
+          () => {
+            if (!view.classList.contains("agent-detail-pending")) {
+              return;
+            }
+            scrollOnReveal = () => {
+              scrollOnReveal = null;
+              if (tabContext.isCurrent() && !deleting) {
+                detailPane.scrollIntoView({ block: "start" });
+                scrolledOnReveal = true;
+              }
+            };
+          },
+          () => {},
+        );
+      }
       // Finish the overview layout and the Logs view's first reads before bringing this
       // version's output into view, so nothing above it grows afterwards (finding 1413).
       await Promise.all([details, revealed, logs.firstView]);
@@ -2580,7 +2653,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           activated &&
           tabs.getBoundingClientRect().top >= 0 &&
           content.getBoundingClientRect().top < innerHeight - Math.min(200, innerHeight / 3);
-        if (!stripKept) {
+        if (!stripKept && !scrolledOnReveal) {
           detailPane.scrollIntoView({ block: "start" });
         }
       }
@@ -2714,7 +2787,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
             try {
               if (options.changedSecrets !== undefined) {
                 for (const secret of options.changedSecrets) {
-                  await ensureSecretOperateBinding(context, freshAgent, secret);
+                  await ensureCredentialOperateBinding(context, freshAgent, secret);
                 }
               }
             } catch (error) {
@@ -2853,8 +2926,8 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
       });
       let savedAuthentication = retained?.savedAuthentication ?? null;
       const originalFields = retained?.originalFields ?? auth.capture();
-      const bindingFields = ({ method, secretSource, account }) =>
-        JSON.stringify({ method, secretSource, account });
+      const bindingFields = ({ method, secretSource, credentialSource, account }) =>
+        JSON.stringify({ method, secretSource, credentialSource, account });
       syncUnsavedAuthentication = () => {
         // Pending and saved states already gate deployment with their own messages.
         data.setAuthenticationUnsaved(
@@ -2935,17 +3008,36 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
             return;
           }
           if (!savedAuthentication) {
+            const credentialSources = (current.credentialSources ?? []).filter(
+              (source) =>
+                current.harnessAuth?.method !== "credential_source" ||
+                current.harnessAuth.sourceId === harnessAuth?.sourceId ||
+                source.sourceId !== current.harnessAuth.sourceId,
+            );
+            if (
+              harnessAuth?.method === "credential_source" &&
+              !credentialSources.some((source) => source.sourceId === harnessAuth.sourceId)
+            ) {
+              credentialSources.push({ sourceId: harnessAuth.sourceId });
+            }
             mutationStarted = true;
             savedAuthentication = await request(path, {
               method: "PATCH",
-              body: { configurationId: agent.configurationId, harnessAuth },
+              body: { configurationId: agent.configurationId, harnessAuth, credentialSources },
             });
             savedAgent = savedAuthentication;
             details = null;
           }
-          if (harnessAuth?.source?.kind === "secret") {
+          if (harnessAuth?.method === "credential_source") {
+            feedback.textContent = "Authentication saved. Checking credential source access…";
+            await ensureCredentialOperateBinding(context, current, {
+              kind: "credential_source",
+              namespaceId: context.namespaceId,
+              id: harnessAuth.sourceId,
+            });
+          } else if (harnessAuth?.source?.kind === "secret") {
             feedback.textContent = "Authentication saved. Checking Secret access…";
-            await ensureSecretOperateBinding(context, current, harnessAuth.source);
+            await ensureCredentialOperateBinding(context, current, harnessAuth.source);
           }
           if (context.isCurrent()) {
             context.drafts.forget("authentication");
@@ -2962,7 +3054,10 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
           if (error.status === 401) {
             context.onExpired();
           } else if (savedAuthentication) {
-            feedback.textContent = `Authentication source saved, but this Agent's Secret access could not be confirmed. ${message(error)} Ask a Namespace administrator to grant this Agent secret:operate on the selected Secret, then retry credential access. Deployment readiness is not confirmed.`;
+            feedback.textContent =
+              savedAuthentication.harnessAuth?.method === "credential_source"
+                ? `Authentication source saved, but this Agent's credential source access could not be confirmed. ${message(error)} Ask a Namespace administrator to grant this Agent operate access to the selected credential source, then retry credential access. Deployment readiness is not confirmed.`
+                : `Authentication source saved, but this Agent's Secret access could not be confirmed. ${message(error)} Ask a Namespace administrator to grant this Agent secret:operate on the selected Secret, then retry credential access. Deployment readiness is not confirmed.`;
           } else {
             outcomeUnknown =
               error.outcomeUnknown ??
@@ -3552,7 +3647,7 @@ export async function renderAgentDetail(context, { agent: preloadedAgent = null 
             usesGeneratedGatewayPassword ? null : enableGatewayPassword,
           ),
           nativeDocument(values, "View native Configuration"),
-          feedback.textContent ? feedback : null,
+          ...(feedback.textContent ? [feedback] : []),
         );
         return;
       }
