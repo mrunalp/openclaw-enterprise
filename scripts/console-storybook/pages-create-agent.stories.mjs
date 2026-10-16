@@ -22,6 +22,7 @@ export const PluginsSelectedSecretDenied = story("createPluginsSelectedSecretDen
 export const PluginsTools = story("createPluginsTools");
 export const PluginsPolicies = story("createPluginsPolicies");
 export const PluginApproversMissingSecret = story("createPluginApproversMissingSecret");
+export const PluginApproversLookup = story("createPluginApproversLookup");
 export const PluginsSetupReminder = story("createPluginsSetupReminder");
 export const PluginsSecondPage = story("createPluginsSecondPage");
 export const PluginsEmpty = story("createPluginsEmpty");
@@ -125,6 +126,10 @@ export const CreatePresetInvalidField = {
 export const CreateCapabilitiesDenied = {
   ...story("createCapabilitiesDenied"),
   name: "Agent creation needs an administrator",
+};
+export const CreateRestricted = {
+  ...story("createRestricted"),
+  name: "Create Agent unavailable for this caller",
 };
 export const CreateCapabilitiesError = {
   ...story("createCapabilitiesError"),
