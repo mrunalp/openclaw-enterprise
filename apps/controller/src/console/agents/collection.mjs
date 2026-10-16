@@ -171,7 +171,7 @@ export function renderAgentList(context) {
         permissions.set(item.id, answer);
         if (answer?.operate === false || answer?.delete === false) {
           restrictOpenDialog?.(item.id, answer);
-          render();
+          updateRowActions(item.id);
         }
       },
       () => {},
@@ -394,6 +394,38 @@ export function renderAgentList(context) {
     return { stop, delete: remove, note };
   }
 
+  function actionCellContent(actions) {
+    return [
+      element(
+        "div",
+        { className: "agent-row-actions" },
+        actions.stop ?? element("span", { className: "icon-button-spacer" }),
+        actions.delete,
+      ),
+      actions.note,
+    ];
+  }
+
+  // A permission answer changes only its own row's actions. Redrawing the whole table would
+  // drop keyboard focus from wherever the person is, so update that cell in place and move
+  // focus only when the focused icon itself is replaced, keeping it in the same row.
+  function updateRowActions(id) {
+    const controls = rowControls.get(id);
+    const item = items.find((entry) => entry.id === id);
+    if (!controls?.cell.isConnected || !item) {
+      return;
+    }
+    const focused = ["stop", "delete"].find(
+      (kind) => controls[kind] && controls[kind] === document.activeElement,
+    );
+    const actions = rowActions(item);
+    controls.cell.replaceChildren(...actionCellContent(actions).filter(Boolean));
+    Object.assign(controls, actions);
+    if (focused) {
+      focusRow(id, focused);
+    }
+  }
+
   function render() {
     const query = search.value.trim().toLowerCase();
     const matches = items
@@ -441,7 +473,8 @@ export function renderAgentList(context) {
       readPermissions(item);
       const name = link(item.name, `agents/${item.id}`, context);
       const actions = rowActions(item);
-      rowControls.set(item.id, { name, ...actions });
+      const cell = element("td", {}, ...actionCellContent(actions));
+      rowControls.set(item.id, { name, cell, ...actions });
       const deployment = element("td", {}, "Reading deployment…");
       if (!deployments.has(item.id)) {
         deployments.set(
@@ -547,17 +580,7 @@ export function renderAgentList(context) {
           ),
           deployment,
           element("td", {}, displayDate(item.createdAt)),
-          element(
-            "td",
-            {},
-            element(
-              "div",
-              { className: "agent-row-actions" },
-              actions.stop ?? element("span", { className: "icon-button-spacer" }),
-              actions.delete,
-            ),
-            actions.note,
-          ),
+          cell,
         ),
       );
     }

@@ -1383,3 +1383,86 @@ test("Agents list row actions explain missing access and still report a refused 
   await row.getByText("Stop requested", { exact: true }).waitFor();
   assert.equal((await fixture.request("GET", agentPath)).data.desiredRuntimeState, "stopped");
 });
+
+test("Agents list permission advice updates its own row without moving focus elsewhere", async (t) => {
+  const fixture = await createConsoleAppFixture(t, { provisionedPeople: ["row-browser"] });
+  await fixture.bootstrap();
+  const namespace = await fixture.createNamespace("Row focus", { ready: true });
+  const guarded = await fixture.createAgent(namespace.id, "Guarded Agent", nativeValues("guard"));
+  await fixture.seedActiveAgentRevision(namespace.id, guarded.id);
+  const other = await fixture.createAgent(namespace.id, "Other Agent", nativeValues("other"));
+  await fixture.seedActiveAgentRevision(namespace.id, other.id);
+  const person = fixture.provisionedAccounts[0];
+  const policyPath = `/namespaces/${namespace.id}/iam`;
+  const bind = async (permissions, resourceKind, resourceId) => {
+    const role = await fixture.request("POST", `${policyPath}/roles`, { body: { permissions } });
+    assert.equal(role.status, 201);
+    const binding = await fixture.request("POST", `${policyPath}/access-bindings`, {
+      body: {
+        subjectKind: "identity",
+        subjectId: person.principal.id,
+        roleId: role.data.id,
+        resourceKind,
+        resourceId,
+      },
+    });
+    assert.equal(binding.status, 201);
+  };
+  // A reader of both Agents with neither operate nor delete, so each permission read refuses.
+  await bind([{ action: "read", resourceKind: "namespace" }], "namespace", namespace.id);
+  await bind([{ action: "read", resourceKind: "agent" }], "agent", guarded.id);
+  await bind([{ action: "read", resourceKind: "agent" }], "agent", other.id);
+  const { page } = await newPage(t, fixture);
+  const requests = apiRequests(page, fixture.origin);
+  // Hold only Guarded Agent's permission read; its real answer is released on cue.
+  const holdGuardedAdvice = async () => {
+    let release;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    await page.route(
+      `${fixture.origin}/namespaces/${namespace.id}/agents/${guarded.id}/permissions`,
+      async (route) => {
+        await held;
+        await route.continue().catch(() => {});
+      },
+      { times: 1 },
+    );
+    return release;
+  };
+  const focusedText = () => page.evaluate(() => globalThis.document.activeElement?.textContent);
+  const guardedRow = page.getByRole("row").filter({ hasText: "Guarded Agent" });
+  const otherRow = page.getByRole("row").filter({ hasText: "Other Agent" });
+
+  // Someone browsing by keyboard sits on Other Agent's link when Guarded Agent's refusal
+  // arrives. Guarded Agent's icons must update, and focus must stay where it was.
+  let release = await holdGuardedAdvice();
+  await login(page, fixture, listUrl(namespace.id), person.credentials);
+  await otherRow.getByText("No access to stop or delete", { exact: true }).waitFor();
+  const otherLink = otherRow.getByRole("link", { name: "Other Agent" });
+  await otherLink.focus();
+  release();
+  await guardedRow.getByText("No access to stop or delete", { exact: true }).waitFor();
+  assert.equal(
+    await guardedRow.getByRole("button", { name: "Stop Guarded Agent" }).isDisabled(),
+    true,
+  );
+  assert.equal(await otherLink.evaluate((node) => node.ownerDocument.activeElement === node), true);
+
+  // When the focused icon is the one the refusal disables, focus stays in that row.
+  release = await holdGuardedAdvice();
+  await page.getByRole("button", { name: "Refresh", exact: true }).click();
+  const guardedStop = guardedRow.getByRole("button", { name: "Stop Guarded Agent" });
+  await page.waitForFunction(
+    () =>
+      globalThis.document.querySelector('[aria-label="Stop Guarded Agent"]')?.disabled === false,
+  );
+  await guardedStop.focus();
+  release();
+  await guardedRow.getByText("No access to stop or delete", { exact: true }).waitFor();
+  await page.waitForFunction(
+    () => globalThis.document.activeElement?.textContent === "Guarded Agent",
+  );
+  assert.equal(await focusedText(), "Guarded Agent");
+  assert.deepEqual(nonAuthWriteRequests(requests), []);
+});
