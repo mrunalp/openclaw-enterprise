@@ -319,14 +319,13 @@ An uncertain initial or repeated deletion blocks writes until a successful exact
 Agent read; a deleting read clears that guard, a failed read does not. Cancel
 returns focus to the repeat-request button. The browser never retries DELETE automatically.
 
-`apps/controller/src/console/agents/collection.mjs:renderAgentList` row icons
-send the same Stop and Delete requests after the shared confirmations. Each row
-reads its Agent's [permission advice](../../reference/api.md#get-namespacesnamespaceidagentsagentidpermissions);
-a refusal disables that icon with a visible note, or, during confirmation,
-disables confirmation and focuses Cancel. A stopped Agent with no selected
-revision shows no Stop icon. An accepted response replaces the row; the list does
-not poll. A `404`, `409`, or unconfirmed outcome disables the row's icons until
-**Refresh**.
+`apps/controller/src/console/agents/collection.mjs:renderAgentList` rows use the
+same Stop and Delete confirmations. Each row reads
+[permission advice](../../reference/api.md#get-namespacesnamespaceidagentsagentidpermissions).
+Refusal disables the action and explains why; in an open confirmation, it also
+disables confirmation and focuses Cancel. A stopped Agent without a selected
+revision has no Stop action. Acceptance updates the row without polling.
+After `404`, `409`, or an uncertain outcome, the actions stay disabled until **Refresh**.
 
 `packages/occ/src/index.ts:deleteAgent` owns deletion admission. The
 [Agent deletion reference](../../reference/agents.md#deletion) covers
