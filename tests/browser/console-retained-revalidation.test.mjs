@@ -140,8 +140,13 @@ async function signedOutPage(t) {
 
 // Signs in to a loaded Agents list (`agentNames`: one name or a list). Unless `running`, the
 // page clock is installed and paused once the list loads, so timers run only when a test runs
-// it, and every page shown is recorded.
-async function openList(t, name, agentNames, { deploy = false, running = false } = {}) {
+// it, and every page shown is recorded. `beforeLogin(page, namespace)` can route the page's reads.
+async function openList(
+  t,
+  name,
+  agentNames,
+  { deploy = false, running = false, beforeLogin = null } = {},
+) {
   const names = [agentNames].flat();
   const { fixture, page } = await signedOutPage(t);
   const namespace = await fixture.createNamespace(name, { ready: true });
@@ -156,6 +161,7 @@ async function openList(t, name, agentNames, { deploy = false, running = false }
     await page.clock.install();
   }
   const listUrl = `/console/agents?namespace=${namespace.id}`;
+  await beforeLogin?.(page, namespace);
   await login(page, fixture, listUrl);
   await listShown(page, names[0]);
   // The list reads each row's latest deployment after it settles; let those finish, so the
@@ -236,6 +242,32 @@ test("Refocusing a loaded page keeps it steady while access is rechecked", async
   await create.click();
   await page.waitForURL("**/console/agents/new**");
 });
+
+for (const moveToSidebar of [false, true]) {
+  test(`Agent revalidation ${moveToSidebar ? "preserves newer sidebar focus" : "restores header action focus"}`, async (t) => {
+    const { page } = await openList(t, "Header focus", "Header Agent", {
+      deploy: true,
+      running: true,
+    });
+    await openAgent(page, "Header Agent");
+    const action = page.locator(".page-header").getByRole("button", { name: "Create new version" });
+    const sidebar = page.getByRole("link", NAMESPACES);
+    await action.focus();
+    assert.equal(await isFocused(action), true);
+
+    const session = await holdOnce(t, page);
+    await refocus(page);
+    await session.requested;
+    await page.locator(heldView).waitFor();
+    assert.equal(await action.evaluate((node) => node.closest("[inert]") !== null), true);
+    if (moveToSidebar) {
+      await sidebar.focus();
+    }
+    session.release();
+    await page.locator(settledView).waitFor();
+    assert.equal(await isFocused(moveToSidebar ? sidebar : action), true);
+  });
+}
 
 test("Back after switching Namespace keeps the shown page until the return is admitted", async (t) => {
   const { fixture, page } = await signedOutPage(t);
@@ -400,19 +432,20 @@ test("A page held for Agents keeps its own navigation and header until Agents re
   ]);
 
   // A return from Settings: the retained list revalidates while Settings is held.
-  await page.getByRole("button", { name: /OpenClaw Enterprise/ }).click();
+  await page.locator(".account-toggle").click();
   await page.getByRole("menuitem", { name: "Settings" }).click();
   await page.locator(settledView).locator("dl.settings").waitFor();
   await shownFrames(page);
   const returnRead = await holdOnce(t, page, list);
-  await page.getByRole("button", { name: "Back", exact: true }).click();
+  await page.getByRole("link", { name: "Agents", exact: true }).click();
   await returnRead.requested;
   returnRead.release();
   await listShown(page, "Shell Agent");
-  // The first entry is the state the recorder re-reads after the previous splice.
+  // The first entry is the state the recorder re-reads after the previous splice. Settings has
+  // no Namespace scope, so it shows no selector, held or not.
   assert.deepEqual(await shownFrames(page), [
-    "none | Settings | selector | Settings",
-    "none | Settings | selector | Settings (held)",
+    "none | Settings | no selector | Settings",
+    "none | Settings | no selector | Settings (held)",
     agentsShown,
   ]);
 });
@@ -532,7 +565,7 @@ for (const c of [
     prepare: (page) => openAgent(page, "Draft Agent"),
     enter: (page) =>
       page
-        .locator(".agent-overview-toolbar")
+        .locator(".content .page-header")
         .getByRole("button", { name: "Create new version" })
         .click(),
     revision: /revision=draft/,
@@ -585,17 +618,23 @@ for (const c of [
 // empty overview for up to 2 s (finding 1537). The startup status now stands in until the
 // overview reveals, and gives way to loading if the delay passes first. Reads that straddled the
 // 250 ms delay painted the loading page for 1-2 frames before the Agent (finding 1554): the blank
-// startup status now stands in until its own text would show, at 400 ms.
-for (const { elapsed, pastDelay } of [
-  { elapsed: 0, pastDelay: false },
-  { elapsed: 250, pastDelay: false },
-  { elapsed: 400, pastDelay: true },
+// startup status now stands in until its own text would show, at 400 ms. Reads that settled just
+// after that still flashed the loading page for under 100 ms (finding 1587): once shown, it now
+// stays 300 ms, and a later Agent is not held back.
+for (const { elapsed, held } of [
+  { elapsed: 0 },
+  { elapsed: 250 },
+  { elapsed: 450, held: 250 },
+  { elapsed: 1500, held: 0 },
 ]) {
-  const when = pastDelay
-    ? " past the loading delay"
-    : elapsed
+  const pastDelay = held !== undefined;
+  const when = !pastDelay
+    ? elapsed
       ? ` ${elapsed} ms in, before the startup text shows`
-      : "";
+      : ""
+    : held
+      ? ` ${elapsed} ms in, holding the loading page its minimum time`
+      : ` ${elapsed} ms in, past the loading page's minimum time`;
   test(`A fresh load of an Agent page keeps a stand-in until the overview reveals${when}`, async (t) => {
     const { fixture, namespace, agent, page } = await openList(
       t,
@@ -615,7 +654,21 @@ for (const { elapsed, pastDelay } of [
     } else {
       assert.equal(await page.locator("#app > .startup").count(), 1);
     }
+    const settled = page.waitForResponse((response) =>
+      response.url().includes(`/agents/${agent.id}/deployments/`),
+    );
     record.release();
+    if (held) {
+      await settled;
+      // The overview's first read has landed: its activity panel replaced the placeholder, and
+      // the reveal is asked for in the same turn. Give it time to run.
+      await page.locator(".content .deployment-evidence").waitFor({ state: "attached" });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      assert.equal(await page.locator(activeView).getByText("Reading this Agent.").count(), 1);
+      await page.clock.runFor(held - 1);
+      assert.equal(await page.locator(activeView).getByText("Reading this Agent.").count(), 1);
+      await page.clock.runFor(1);
+    }
     await agentShown(page);
     assert.deepEqual(await shownFrames(page), [
       "none | none | no selector | none",
@@ -627,6 +680,43 @@ for (const { elapsed, pastDelay } of [
   });
 }
 
+// The same minimum holds when the loading page appears because the session check outlasted the
+// startup delay, not the Agent's reads (finding 1587).
+test("A fresh load whose session check outlasts the startup delay holds the loading page its minimum time", async (t) => {
+  const { fixture, namespace, agent, page } = await openList(t, "Fresh session", "Session Agent", {
+    deploy: true,
+  });
+  await recordShownOnLoad(page, "frames");
+  const session = await holdOnce(t, page);
+  const record = await holdOverview(t, page, namespace, agent);
+  await page.goto(detailUrl(fixture, namespace.id, agent.id).href);
+  await session.requested;
+  await page.clock.runFor(450);
+  session.release();
+  await record.requested;
+  await page.locator(".agent-detail-pending").waitFor({ state: "attached" });
+  const settled = page.waitForResponse((response) =>
+    response.url().includes(`/agents/${agent.id}/deployments/`),
+  );
+  record.release();
+  await settled;
+  await page.locator(".content .deployment-evidence").waitFor({ state: "attached" });
+  // The reveal is asked for in the same turn as the first read; give it time to run.
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  const loading = page.locator(activeView).getByText("Reading this Agent.");
+  assert.equal(await loading.count(), 1);
+  await page.clock.runFor(299);
+  assert.equal(await loading.count(), 1);
+  await page.clock.runFor(1);
+  await agentShown(page);
+  assert.deepEqual(await shownFrames(page), [
+    "none | none | no selector | none",
+    "agents | Agents | selector | Loading…Checking Namespace access.",
+    "agents | Agents | selector | Loading…Reading this Agent.",
+    "agents | Session Agent | selector | Agent",
+  ]);
+});
+
 // While an Agent page rendered hidden behind a held page, its tab handler took Back between two
 // tabs of the same version in place: it marked the Agent's route mounted with another page on
 // screen, so one more navigation could retain that page under the Agent's URL (finding 1542).
@@ -636,7 +726,7 @@ test("Back between an Agent's tabs before its overview reveals loads the tab in 
     deploy: true,
   });
   await openAgent(page, "Tab Agent");
-  await page.getByRole("button", { name: "Plugins", exact: true }).click();
+  await page.getByRole("tab", { name: "Plugins", exact: true }).click();
   await page.waitForURL(/tab=plugins/);
   await showNamespaces(page);
   const record = await holdOverview(t, page, namespace, agent);
@@ -654,7 +744,7 @@ test("Back between an Agent's tabs before its overview reveals loads the tab in 
   record.release();
   await agentShown(page);
   assert.equal(
-    await page.locator('.content [aria-current="page"]', { hasText: "Configuration" }).count(),
+    await page.locator('.content [aria-selected="true"]', { hasText: "Configuration" }).count(),
     1,
   );
   assert.equal(await page.locator('.content [aria-live="polite"]').count(), 1);
@@ -796,6 +886,80 @@ for (const back of ["Browser Back", "Back to Agents"]) {
   });
 }
 
+// Back to the Agents list while an Agent page loaded, or once it had, held that page inert until
+// the list revalidated, and keyboard focus fell to the body for the whole hold (50-310 ms, about
+// 1.2 s on a slow link) before the Agent's link took it (finding 1636). The held page's heading
+// now keeps it until then.
+for (const shown of ["is loading", "has loaded"]) {
+  test(`Back to the Agents list while an Agent page ${shown} keeps keyboard focus`, async (t) => {
+    const { namespace, agent, page } = await openList(t, "Focus back", "Focus Back Agent", {
+      deploy: true,
+      running: true,
+    });
+    let opening = null;
+    if (shown === "is loading") {
+      // Every read of the Agent is held, so its opening panel stays.
+      opening = await openPendingAgent(t, page, namespace, agent, {});
+      await page.getByRole("heading", { level: 1, name: "Agent details" }).waitFor();
+    } else {
+      const link = page.locator(settledView).getByRole("link", { name: agent.name });
+      await link.focus();
+      await link.press("Enter");
+      await agentShown(page);
+    }
+    assert.equal(await page.evaluate(() => globalThis.document.activeElement?.tagName), "H1");
+    // Every frame from Back until the Agent's link has focus: the focused node, numbered so a
+    // replaced heading counts as a new one.
+    await page.evaluate(() => {
+      const ids = new WeakMap();
+      let next = 0;
+      const trail = [];
+      globalThis.focusTrail = trail;
+      globalThis.focusFrames = 0;
+      const sample = () => {
+        globalThis.focusFrames += 1;
+        const node = globalThis.document.activeElement;
+        if (node && node !== globalThis.document.body && !ids.has(node)) {
+          ids.set(node, ++next);
+        }
+        const entry =
+          !node || node === globalThis.document.body
+            ? "BODY"
+            : `${node.tagName}#${ids.get(node)}: ${node.textContent.trim()}`;
+        if (trail.at(-1) !== entry) {
+          trail.push(entry);
+        }
+        if (node?.tagName !== "A") {
+          globalThis.requestAnimationFrame(sample);
+        }
+      };
+      sample();
+    });
+    // The list's recheck takes a while, as on a slow link.
+    const recheck = await holdOnce(t, page, agentsRead(namespace));
+    await page.goBack();
+    await recheck.requested;
+    // Hold the list for a dozen sampled frames.
+    const held = await page.evaluate(() => globalThis.focusFrames);
+    await page.waitForFunction((frames) => globalThis.focusFrames >= frames + 12, held);
+    recheck.release();
+    const link = page.locator(settledView).getByRole("link", { name: agent.name });
+    await link.waitFor();
+    await page.waitForFunction(() => globalThis.focusTrail.at(-1)?.startsWith("A#"));
+    const trail = await page.evaluate(() => globalThis.focusTrail);
+    assert.equal(await isFocused(link), true, trail.join(" | "));
+    const heading = shown === "is loading" ? "Agent details" : agent.name;
+    // The Agent page's heading, the held page's heading under the same name, then the link.
+    assert.deepEqual(
+      trail.map((entry) => entry.replace(/#\d+/, "")),
+      [`H1: ${heading}`, `H1: ${heading}`, `A: ${agent.name}`],
+      trail.join(" | "),
+    );
+    assert.equal(new Set(trail.map((entry) => entry.split(":")[0])).size, 3, trail.join(" | "));
+    opening?.read.release();
+  });
+}
+
 for (const focusTarget of [
   "the Agent link",
   "newer sidebar focus",
@@ -807,7 +971,8 @@ for (const focusTarget of [
     const agent = await fixture.createAgent(namespace.id, "Opening Agent", nativeValues("v1"));
     const list = agentsRead(namespace);
 
-    // Leaving while a row is still loading means Back must build a fresh list, not reuse its DOM.
+    // Leaving while a row is still loading no longer forces a rebuild (finding 1663); a changed
+    // collection does: an Agent added while the reader is away, or the opened one removed.
     const revision = await holdOnce(t, page, `${list}/${agent.id}/revisions`);
     await login(page, fixture, `/console/agents?namespace=${namespace.id}`);
     await revision.requested;
@@ -820,6 +985,9 @@ for (const focusTarget of [
     revision.release();
 
     const removed = focusTarget === "the heading if the Agent is gone";
+    if (!removed) {
+      await fixture.createAgent(namespace.id, "Added Agent", nativeValues("v1"));
+    }
     const collection = await holdRequests(t, page, list, {
       once: true,
       fulfill: removed ? { json: { data: [] } } : null,
@@ -849,6 +1017,168 @@ for (const focusTarget of [
   });
 }
 
+// Records the focused node in every frame until a link in the shown page has focus, numbering
+// nodes so a replaced one counts as new: "BODY" marks a frame with focus on the body.
+function trackFocusUntilPageLink() {
+  const document = globalThis.document;
+  const ids = new WeakMap();
+  let next = 0;
+  const trail = [];
+  globalThis.focusTrail = trail;
+  globalThis.focusFrames = 0;
+  const sample = () => {
+    globalThis.focusFrames += 1;
+    const node = document.activeElement;
+    if (node && node !== document.body && !ids.has(node)) {
+      ids.set(node, ++next);
+    }
+    const entry =
+      !node || node === document.body
+        ? "BODY"
+        : `${node.tagName}#${ids.get(node)}: ${node.textContent.trim()}`;
+    if (trail.at(-1) !== entry) {
+      trail.push(entry);
+    }
+    if (!node?.matches('.content [aria-live="polite"] a')) {
+      globalThis.requestAnimationFrame(sample);
+    }
+  };
+  sample();
+}
+
+// The sidebar's Agents link, pressed on an Agent page, held that page inert until the list
+// revalidated. The shell rebuilt around it replaced the pressed link, so keyboard focus fell to
+// the body for the whole hold (2-12 frames, about 0.9 s on a slow link) before the Agent's link
+// took it (finding 1653); #2712 kept it only for Back. The held page's heading now keeps it.
+for (const how of ["Enter", "a click"]) {
+  test(`The sidebar's Agents link pressed with ${how} on an Agent page keeps keyboard focus`, async (t) => {
+    const { namespace, agent, page } = await openList(t, `Sidebar ${how}`, "Sidebar Agent", {
+      deploy: true,
+      running: true,
+    });
+    const agentLink = page.locator(settledView).getByRole("link", { name: agent.name });
+    await agentLink.focus();
+    await agentLink.press("Enter");
+    await agentShown(page);
+    const sidebar = page.getByRole("link", { name: "Agents", exact: true });
+    await sidebar.focus();
+    await page.evaluate(trackFocusUntilPageLink);
+    // The list's recheck takes a while, as on a slow link.
+    const recheck = await holdOnce(t, page, agentsRead(namespace));
+    await (how === "Enter" ? sidebar.press("Enter") : sidebar.click());
+    await recheck.requested;
+    // Hold the list for a dozen sampled frames.
+    const held = await page.evaluate(() => globalThis.focusFrames);
+    await page.waitForFunction((frames) => globalThis.focusFrames >= frames + 12, held);
+    recheck.release();
+    await agentLink.waitFor();
+    await page.waitForFunction(() => globalThis.focusTrail.at(-1)?.startsWith("A#"));
+    const trail = await page.evaluate(() => globalThis.focusTrail);
+    assert.equal(await isFocused(agentLink), true, trail.join(" | "));
+    // The pressed link, the held page's heading, then the Agent's link in the list.
+    assert.deepEqual(
+      trail.map((entry) => entry.replace(/#\d+/, "")),
+      ["A: ◇Agents", `H1: ${agent.name}`, `A: ${agent.name}`],
+      trail.join(" | "),
+    );
+  });
+}
+
+// A refocus recheck of the Agents list holds it inert, which blurs the focused control, and the
+// list remounted unchanged with focus on the body: a keyboard reader lost their place each time
+// they came back to the tab (finding 1654). The control now takes focus back, as on an Agent
+// page, and the search box keeps its caret. A deployment link, which the remount replaces until
+// its reread lands, gives focus to that pending cell, as Back does. Focus never visits the
+// heading (#2712 review).
+for (const target of [
+  "an Agent link",
+  "the search box",
+  "a deployment link",
+  "the sidebar it moved to during the check",
+]) {
+  test(`A refocus recheck of the Agents list gives focus back to ${target}`, async (t) => {
+    const deployment = target === "a deployment link";
+    const { agent, page } = await openList(t, `Refocus ${target}`, "Refocus Agent", {
+      deploy: deployment,
+      running: true,
+      // The fixture runs no worker: serve each record as a finished deployment reads.
+      beforeLogin: (page, namespace) =>
+        page.route(`**/namespaces/${namespace.id}/agents/*/deployments/*`, (route) =>
+          route.fulfill({
+            json: {
+              data: { namespaceId: namespace.id, status: "succeeded", error: null, warnings: [] },
+              meta: { requestId: "req_test_refocus" },
+            },
+          }),
+        ),
+    });
+    const search = target === "the search box";
+    const moved = target === "the sidebar it moved to during the check";
+    const cell = page.locator(settledView).locator(".agent-deployment");
+    const control = search
+      ? page.locator(settledView).getByRole("searchbox", { name: "Search Agents" })
+      : deployment
+        ? cell.getByRole("link")
+        : page.locator(settledView).getByRole("link", { name: agent.name });
+    const sidebar = page.getByRole("link", NAMESPACES);
+    await tagView(page, "refocused");
+    if (search) {
+      await control.fill("Refocus");
+      await page.getByText("Reading deployment…").first().waitFor({ state: "detached" });
+      await control.evaluate((input) => input.setSelectionRange(2, 4));
+    } else {
+      await control.focus();
+    }
+    const focusedIn = (locator) =>
+      locator.evaluate((node) => node.contains(globalThis.document.activeElement));
+    const heading = page.getByRole("heading", { level: 1, name: "Agents" });
+    const session = await holdOnce(t, page);
+    await refocus(page);
+    await session.requested;
+    await page.locator(heldView).waitFor();
+    if (moved) {
+      // The reader moved on while the page was held: the remount leaves their focus alone.
+      await sidebar.focus();
+    }
+    session.release();
+    await page.locator(settledView).waitFor();
+    assert.equal(await viewTag(page), "refocused", "the list remounted unchanged");
+    assert.equal(await isFocused(heading), false, "focus stays off the heading");
+    if (deployment) {
+      assert.equal(await focusedIn(cell), true, "focus waits in the pending deployment");
+      await page.getByText("Reading deployment…").first().waitFor({ state: "detached" });
+    }
+    assert.equal(
+      await isFocused(moved ? sidebar : control),
+      true,
+      moved ? "focus stays where the reader moved it" : "focus is back on the control",
+    );
+    if (search) {
+      assert.deepEqual(
+        await control.evaluate((input) => [input.selectionStart, input.selectionEnd]),
+        [2, 4],
+      );
+    }
+  });
+}
+
+test("a list recheck never reclaims focus moved to the Namespace selector", async (t) => {
+  const { namespace, agent, page } = await openList(t, "Refocus elsewhere", "Former focus");
+  const link = page.getByRole("link", { name: agent.name });
+  await link.focus();
+  const read = await holdOnce(t, page, agentsRead(namespace));
+  await refocus(page);
+  await read.requested;
+  const selector = page.locator("#namespace-selector:not(:disabled)");
+  await selector.focus();
+  assert.equal(await isFocused(selector), true);
+  read.release();
+  await page.locator(settledView).getByRole("link", { name: agent.name }).waitFor();
+  // Unlike the sidebar link, the selector is replaced during remount. Even if focus falls to
+  // the body, the reader left the Agent link deliberately; do not move them back to it.
+  assert.equal(await isFocused(link), false);
+});
+
 for (const [outcome, failsAgain, leaveFocus] of [
   ["opens the Agent", false, false],
   ["fails a second time", true, false],
@@ -870,6 +1200,8 @@ for (const [outcome, failsAgain, leaveFocus] of [
     const main = page.getByRole("main");
     const retry = main.getByRole("button", { name: "Try again" });
     await main.getByRole("heading", { name: "Could not load agent details" }).waitFor();
+    const pageHeading = main.getByRole("heading", { level: 1 });
+    assert.equal(await pageHeading.innerText(), "Agent details");
     assert.equal(await main.getByRole("button", { name: "Back to Agents" }).isVisible(), true);
 
     const historyLength = await page.evaluate(() => globalThis.history.length);
@@ -892,6 +1224,7 @@ for (const [outcome, failsAgain, leaveFocus] of [
     // Focus moves to the result once the load settles, after the heading has rendered.
     await page.locator(settledView).waitFor();
     assert.equal(await isFocused(leaveFocus ? sidebar : result), true);
+    assert.equal(await pageHeading.innerText(), failsAgain ? "Agent details" : "Retry Agent");
     assert.equal(
       await page.evaluate(() => globalThis.history.length),
       historyLength,
@@ -1186,16 +1519,16 @@ test("Logout during a first visit's hold leaves nothing private, even after Back
   const agentRead = await holdAgent(t, page, namespace, agent);
   await page.getByRole("link", { name: "Held Agent" }).click();
   await agentRead.requested;
-  await page.getByRole("button", { name: /OpenClaw Enterprise/ }).click();
-  await page.getByRole("menuitem", { name: "Logout" }).click();
-  await page.getByRole("button", { name: "Login" }).waitFor();
+  await page.locator(".account-toggle").click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByRole("button", { name: "Sign in" }).waitFor();
   agentRead.release();
   await page.clock.runFor(400);
   assert.equal(await page.locator(".content, nav").count(), 0);
   // Back reloads the list's URL: the session is gone, so sign-in shows again.
   await page.goBack();
   await page.clock.runFor(400);
-  await page.getByRole("button", { name: "Login" }).waitFor();
+  await page.getByRole("button", { name: "Sign in" }).waitFor();
   assert.equal(await page.locator(".content, nav").count(), 0);
   assert.ok(!(await showedAgent(page)), "the held Agent page showed after logout");
 });
@@ -1212,7 +1545,7 @@ test("A Stop that lands after leaving the Agent closes its dialog, and Back rebu
     afterServer: true,
   });
   await page.getByRole("button", { name: "Stop Agent", exact: true }).first().click();
-  const dialog = page.getByRole("dialog", { name: "Stop Stopping Agent?" });
+  const dialog = page.getByRole("dialog", { name: "Stop this Agent?" });
   await dialog.getByRole("button", { name: "Stop Agent" }).click();
   await stop.requested;
   // The dialog is modal, so leave through the navigation link's own handler.
@@ -1226,10 +1559,8 @@ test("A Stop that lands after leaving the Agent closes its dialog, and Back rebu
   await page.goBack();
   await agentShown(page);
   assert.notEqual(await viewTag(page), "before-stop");
-  assert.equal(
-    await page.getByRole("button", { name: "Stop Agent", exact: true }).first().isDisabled(),
-    true,
-  );
+  await page.getByRole("button", { name: "Request Stop again", exact: true }).waitFor();
+  assert.equal(await page.getByRole("button", { name: "Stop Agent", exact: true }).count(), 0);
 });
 
 // The case above trusts holdRequests() to send a held write exactly once. A loopback origin
@@ -1509,7 +1840,7 @@ test("the console shell paints a neutral status before any script runs and keeps
     await page.waitForFunction(firstContentfulPaint, null, { timeout: 5_000 });
     await status.getByText("Loading OpenClaw Enterprise…", { exact: true }).waitFor();
     assert.equal(await page.locator("nav, .content, #namespace-selector").count(), 0, path);
-    assert.equal(await page.getByLabel("Username").count(), 0, path);
+    assert.equal(await page.getByLabel("Email", { exact: true }).count(), 0, path);
     const box = await status.boundingBox();
     await status.evaluate((node) => {
       node.dataset.staticShell = "kept";
@@ -1523,9 +1854,9 @@ test("the console shell paints a neutral status before any script runs and keeps
     assert.equal(await status.getAttribute("data-static-shell"), "kept", path);
     assert.deepEqual(await status.boundingBox(), box, path);
     assert.equal(await page.locator("nav, .content, #namespace-selector").count(), 0, path);
-    assert.equal(await page.getByLabel("Username").count(), 0, path);
+    assert.equal(await page.getByLabel("Email", { exact: true }).count(), 0, path);
     session.release();
-    await page.getByLabel("Username").waitFor();
+    await page.getByLabel("Email", { exact: true }).waitFor();
     await page.unrouteAll({ behavior: "ignoreErrors" });
   }
 });
@@ -1563,7 +1894,7 @@ test("the boot status stays hidden through a fast load and the scrollbar keeps i
     "stable",
   );
   script.release();
-  await page.getByLabel("Username").waitFor();
+  await page.getByLabel("Email", { exact: true }).waitFor();
 });
 
 // The web font is fetched alongside the stylesheet, so it is ready before the console's first
@@ -1595,6 +1926,6 @@ test("the console web font is ready before the entry script runs, fetched once",
     { timeout: 5_000 },
   );
   script.release();
-  await page.getByLabel("Username").waitFor();
+  await page.getByLabel("Email", { exact: true }).waitFor();
   assert.deepEqual(fonts, [`${fixture.origin}/console/fonts/instrument-sans-latin.woff2`]);
 });

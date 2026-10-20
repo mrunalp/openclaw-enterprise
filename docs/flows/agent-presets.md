@@ -10,7 +10,7 @@ last_updated_session: authoring-run/23d60562-6525-4593-ad0c-29ce57483c38
 
 The Console renders a Namespace Preset and saves an independent Configuration
 and Agent through existing APIs. This flow stops at the draft; deployment follows
-[revision admission](configuration-driver/persistence-and-revisions.md).
+[version admission](configuration-driver/persistence-and-revisions.md).
 
 ## Entry Points
 
@@ -56,7 +56,7 @@ graph TD
   O -->|Grant fails| R["Retain Agent and retry credential access"]
   F -->|Invalid variable| E
   I -->|Agent save fails| K["Keep Configuration ID for safe retry"]
-  J --> L["Credential preparation and revision admission"]
+  J --> L["Credential preparation and version admission"]
 ```
 
 ## Execution Trace
@@ -187,12 +187,14 @@ and uses ordinary creation recovery.
 
 Before resetting views, `loadPage` captures unsaved JSON, model controls, workspace
 files, repositories and staged Secret references per user and Namespace. Explicit
-Preset forms return from this copy with fresh capability and repository discovery;
-default-shortcut and bare forms discard on exit. Flushing removes creation and
-channel snapshots and the retained view on exit or Namespace change; re-entry
-opens the chooser and preserves saved resources. Invalid JSON stays text; passwords
-and discovery results are excluded. Start over, session loss, logout, user change,
-page exit, or starting save clears captures. Partial-save recovery stays local.
+Preset, default-shortcut and bare forms all return from this copy with fresh
+capability and repository discovery. A confirmed **Cancel** removes creation and
+channel snapshots and the retained view; re-entry opens the chooser and preserves
+saved resources. `beforeunload` asks first while any capture holds changes. Invalid JSON stays text; passwords
+and discovery results are excluded. Start over, session loss, logout, user change or
+page exit clears captures, not a failed `/namespaces` read. A known Create refusal keeps
+the capture and its saved resources, unless repository policy refused it or an Agent,
+provisioning job or credential registration exists.
 
 `agents/create.mjs:updateModelConfiguration` retains ordered fallbacks and
 model metadata referenced by defaults or entries. Only an unreferenced replaced
@@ -251,9 +253,9 @@ another creation attempt. See [creation recovery](../reference/console/create-an
 
 The saved Agent has a new identity and no Preset reference. Variable inputs are
 not stored as a separate map. Rendered values are ordinary Agent/Configuration
-settings. Credential preparation and [revision admission](configuration-driver/persistence-and-revisions.md)
+settings. Credential preparation and [version admission](configuration-driver/persistence-and-revisions.md)
 read those resources, not the Preset. Later Preset changes cannot change a draft
-or an immutable admitted revision.
+or an immutable saved version.
 
 ## Debugging and Verification
 

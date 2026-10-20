@@ -1,4 +1,11 @@
-import { button, element, replaceChildrenIfChanged, setText } from "../dom.mjs";
+import {
+  button,
+  element,
+  replaceChildrenIfChanged,
+  setHidden,
+  setText,
+  statusBlock,
+} from "../dom.mjs";
 import { message } from "./list.mjs";
 
 // Deletion finishes in the background; poll until the Agent is gone, then return to the list.
@@ -18,16 +25,20 @@ export function keptResourcesText(agent) {
 }
 
 export function createAgentDeletion(context, path, agent, onDeleting, allowed = null) {
+  // One row of the Agent page's danger zone (UX spec 3.9); the confirmation carries the detail.
   const section = element("section", {
-    className: "agent-card deletion-note",
+    className: "danger-zone-row deletion-note",
     "aria-labelledby": "agent-deletion-title",
   });
   const permissionNotice = "Your access does not include deleting this Agent.";
   let restrictConfirmation;
-  const feedback = element("div");
-  const actions = element("div", { className: "form-actions" });
+  const feedback = element("div", { className: "danger-zone-feedback" });
+  const actions = element("div", { className: "danger-zone-actions" });
   const remove = button("Delete Agent", openConfirmation, { className: "danger" });
-  const refresh = button("Refresh deletion status", () => void refreshStatus());
+  const refresh = button("Refresh deletion status", () => void refreshStatus(), {
+    tone: "ghost",
+    size: "sm",
+  });
   const state = {
     deleting: agent.status === "deleting",
     pending: false,
@@ -40,19 +51,28 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
     accessEnded: false,
     notice: "",
     error: null,
+    // Set once this viewer opens the confirmation, so the row never vanishes under them.
+    used: false,
   };
   let pollTimer;
-  const heading = element("h2", { id: "agent-deletion-title", tabindex: "-1" }, "Delete Agent");
+  // A repeat confirmed while a quiet poll reads. Reads and writes stay serialized, so it is sent
+  // when that read ends instead of being dropped (finding 1975).
+  let queuedDelete = null;
+  const heading = element("h3", { id: "agent-deletion-title", tabindex: "-1" }, "Delete Agent");
 
   section.append(
-    heading,
     element(
-      "p",
-      { className: "muted" },
-      "Permanently delete this Agent, its version history, and its workspace data. Namespace-owned Configurations and Secrets are kept. This cannot be undone.",
+      "div",
+      { className: "danger-zone-text" },
+      heading,
+      element(
+        "p",
+        { className: "muted" },
+        "Permanently deletes this Agent, its versions and its workspace data. Cannot be undone.",
+      ),
     ),
-    feedback,
     actions,
+    feedback,
   );
 
   function render() {
@@ -66,16 +86,16 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
         ? "Deletion was requested. The Agent cannot be edited or deployed. If cleanup has stopped after a failure, fix the cause and request deletion again."
         : state.notice;
     replaceChildrenIfChanged(feedback, [
-      ...(status ? [element("p", { className: "notice", role: "status" }, status)] : []),
+      ...(status ? [statusBlock("info", null, status)] : []),
       ...(state.forbidden && !state.accessEnded
-        ? [element("p", { className: "notice", role: "status" }, permissionNotice)]
+        ? [statusBlock("info", null, permissionNotice)]
         : []),
       ...(state.error
         ? [
             element(
               "div",
-              { className: "error", role: "alert" },
-              element("p", {}, state.error.text),
+              { className: "status", "data-tone": "danger", role: "alert" },
+              element("p", { className: "status-body" }, state.error.text),
               state.error.requestId
                 ? element("p", { className: "request-id" }, `Request ID: ${state.error.requestId}`)
                 : null,
@@ -87,6 +107,10 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
     remove.disabled = checking || state.needsRefresh || state.forbidden;
     refresh.disabled = checking;
     setText(refresh, checking ? "Checking…" : "Refresh deletion status");
+    // A viewer whose permission answer denies Agent delete has no row (UX spec 3.9). A missing
+    // answer keeps it, and the API still decides. A deleting Agent keeps it: the row is the
+    // page's only report of the cleanup.
+    setHidden(section, state.forbidden && !state.used && !state.deleting);
     const shown = state.accessEnded
       ? []
       : state.deleting || state.needsRefresh
@@ -101,12 +125,14 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
     }
   }
 
-  function setDeleting() {
+  function setDeleting({ notifyPage = true } = {}) {
     state.deleting = true;
     state.needsRefresh = false;
     state.notice = "";
-    onDeleting();
     schedulePoll();
+    if (notifyPage) {
+      onDeleting();
+    }
   }
 
   function schedulePoll() {
@@ -193,11 +219,20 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
       }
     } finally {
       document.removeEventListener("focusin", trackFocus, true);
+      const queued = queuedDelete;
+      queuedDelete = null;
       if (context.isCurrent()) {
         const quiet = state.polling;
         state.pending = false;
         state.polling = false;
         render();
+        // A read that ended access drops a waiting repeat with its dialog, before focus moves:
+        // the heading cannot take focus while the modal is open. Forbidden and needs-refresh
+        // states cannot arise while one waits; they are checked defensively.
+        const dropQueued = state.accessEnded || state.forbidden || state.needsRefresh;
+        if (queued && dropQueued) {
+          queued.dialog.close();
+        }
         if (state.accessEnded) {
           // Refresh is gone, so keep focus in this section on its heading.
           if (focusedHere) {
@@ -206,20 +241,39 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
         } else if (!quiet && focusedHere) {
           (state.deleting || state.needsRefresh ? refresh : remove).focus({ preventScroll: true });
         }
+        if (queued && !dropQueued) {
+          // Sent even after a failed read: the reader confirmed it, and its outcome replaces
+          // the read's error.
+          void deleteAgent(queued.dialog, queued.cancel, queued.confirm);
+        }
       }
     }
   }
 
+  function showSending(cancel, confirm) {
+    cancel.disabled = true;
+    confirm.disabled = true;
+    confirm.textContent = "Deleting…";
+    // Busy, not merely disabled: the progress cursor, and "working" for assistive technology.
+    confirm.setAttribute("aria-busy", "true");
+  }
+
   async function deleteAgent(dialog, cancel, confirm) {
-    if (state.forbidden || state.pending || state.needsRefresh || !context.isCurrent()) {
+    if (state.forbidden || state.needsRefresh || !context.isCurrent()) {
+      return;
+    }
+    if (state.pending) {
+      // A quiet poll is reading: show the repeat as sent and send it when the read ends.
+      if (state.polling && !queuedDelete) {
+        queuedDelete = { dialog, cancel, confirm };
+        showSending(cancel, confirm);
+      }
       return;
     }
     state.pending = true;
     state.error = null;
     state.notice = "";
-    cancel.disabled = true;
-    confirm.disabled = true;
-    confirm.textContent = "Deleting…";
+    showSending(cancel, confirm);
     render();
     try {
       const current = await context.request(path, { method: "DELETE" });
@@ -283,8 +337,9 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
       return;
     }
     const retry = state.deleting;
+    state.used = true;
     const dialog = element("dialog", {
-      className: "agent-delete-dialog",
+      className: "dialog agent-delete-dialog",
       "aria-labelledby": "agent-delete-confirm-title",
       "aria-describedby": "agent-delete-confirm-description agent-delete-confirm-kept",
     });
@@ -308,6 +363,12 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
       if (!dialog.open || (state.pending && !state.polling)) {
         return;
       }
+      if (queuedDelete?.dialog === dialog) {
+        // The waiting repeat was never sent: drop it with its dialog.
+        queuedDelete = null;
+        dialog.close();
+        return;
+      }
       confirm.disabled = true;
       description.textContent = permissionNotice;
       cancel.focus();
@@ -324,7 +385,7 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
       element("div", { className: "form-actions" }, cancel, confirm),
     );
     dialog.addEventListener("cancel", (event) => {
-      if (state.pending && !state.polling) {
+      if ((state.pending && !state.polling) || queuedDelete?.dialog === dialog) {
         event.preventDefault();
       }
     });
@@ -343,7 +404,12 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
           !(state.pending && !state.polling) &&
           document.activeElement === document.body
         ) {
-          (state.forbidden ? heading : state.needsRefresh ? refresh : remove).focus();
+          (state.forbidden || state.accessEnded
+            ? heading
+            : state.needsRefresh
+              ? refresh
+              : remove
+          ).focus();
         }
       },
       { once: true },
@@ -364,5 +430,17 @@ export function createAgentDeletion(context, path, agent, onDeleting, allowed = 
       render();
     }
   });
-  return section;
+  return {
+    section,
+    // The page found the Agent deleting through another read and now shows only this row.
+    showOnPage({ focus = false } = {}) {
+      if (!state.deleting) {
+        setDeleting({ notifyPage: false });
+      }
+      render();
+      if (focus) {
+        refresh.focus();
+      }
+    },
+  };
 }

@@ -1,6 +1,6 @@
 ---
 created: 2026-08-21
-updated: 2026-10-16 13:47
+updated: 2026-10-18
 last_updated_session: authoring-run/6e734247-4639-4e34-8432-e2d0f546353f
 ---
 
@@ -94,9 +94,9 @@ do not select another target.
 For packageless Compute, the exact id `compute-ssh` selects `SshComputeDriver`
 with implementation `occ/ssh`. Every other packageless id retains Kubernetes
 selection. The [SSH reference](../reference/drivers/ssh-compute.md) owns the host
-contract. Its helper is read at module import and sent through bounded SSH
-operations; `bindAgent` supplies authoritative Namespace and ServicePrincipal
-identity before revision operations.
+contract. Its helper is read at module import and sent through SSH
+operations with a 180-second timeout; `bindAgent` supplies authoritative Namespace and ServicePrincipal
+identity before version operations.
 
 Installed packages run arbitrary, unsandboxed code with controller database,
 credential, Kubernetes, tenant, and authorization authority. An untrusted or
@@ -116,12 +116,14 @@ packaged IAM receive the same controller-owned platform state. The bundled IAM
 Driver loads current policy for each identity lookup and authorization decision;
 packaged Drivers must do the same, which operator review verifies because the
 runtime cannot enforce package internals. Packaged factories must return their exact server-owned capability
-and identity.
+and identity. The Helm upgrade hook's `installation-check` also runs this loader
+with only `NODE_ENV`, `OCC_CONFIG_PATH` and the Installation and repository
+mounts, so factories must defer other environment and file reads past construction.
 
 Kubernetes-specific image and projected-credential requirements apply only to
 bundled Kubernetes Compute. SSH preflight verifies local SSH files and probes
 each configured host. Startup enforces the
-[production revision-stage contract](../reference/drivers/compute.md#production-revision-stages)
+[production version-stage contract](../reference/drivers/compute.md#production-revision-stages)
 before returning any production runtime; development can use a four-operation
 Driver, and the worker still fails closed if a required stage becomes unavailable.
 
@@ -151,7 +153,7 @@ authorization; installed IAM Drivers must honor the same contract. Neither is
 rebuilt or replaced after account or policy changes.
 
 OCC owns exact-resource authorization and invokes Compute only during Namespace
-or AgentRevision reconciliation. Embedded OpenClaw and dedicated Codex retain
+or Agent revision reconciliation. Embedded OpenClaw and dedicated Codex retain
 their existing Harness-owned runtime topology.
 
 ## Debugging and Verification
@@ -179,6 +181,7 @@ their existing Harness-owned runtime topology.
 
 ## Changelog
 
+- 2026-10-18: Note the upgrade hook's Installation check runs this loader.
 - 2026-10-16 13:47: Preserve selected export URL query and fragment after realpath validation. (authoring-run/6e734247-4639-4e34-8432-e2d0f546353f - 591feb34bdbaaf7f316607347a02f7335ee816c0)
 
 - 2026-10-13 21:02: Keep valid in-package Driver entry filenames that begin with two dots while still refusing parent-directory escapes. (issue-2323 - 5fad4d023a8896ac6bc05a201e6733ee256845b9)
@@ -199,7 +202,7 @@ their existing Harness-owned runtime topology.
 - 2026-08-24 17:12: Documented the controller-owned current-policy loader supplied to bundled and installed IAM Drivers. (01a0352c-debe-73b1-baa6-379855af874f - 4502d7e)
 - 2026-08-24 17:12: Removed IAM policy snapshots and Driver rebuilding; bundled and installed IAM Drivers load current policy for every authorization decision. (01a0352c-debe-73b1-baa6-379855af874f - 4502d7e) (NOT_IN_SPEC)
 - 2026-08-21 20:53: Consolidated startup phases, linked canonical package and Compute contracts, and clarified unsandboxed authorization and tenant-isolation risk. (01a0269c-0551-7f01-9dfc-ffb2a0896c94 - f6491502262d6190c95d2a910ee46283c30244f9)
-- 2026-08-21 20:12: Required both typed Compute revision stages before production startup while preserving four-method development Drivers. (01a0269c-0551-7f01-9dfc-ffb2a0896c94 - b651c4ae38310032f8cda47c868a9b282fb12ff3)
+- 2026-08-21 20:12: Required both typed Compute version stages before production startup while preserving four-method development Drivers. (01a0269c-0551-7f01-9dfc-ffb2a0896c94 - b651c4ae38310032f8cda47c868a9b282fb12ff3)
 - 2026-08-21 20:05: Consolidated the package flow into runtime order and linked canonical operator guidance; clarified metadata identity, TypeBox, required IAM factory, and unsandboxed authority. (01a0269c-0551-7f01-9dfc-ffb2a0896c94 - b651c4ae38310032f8cda47c868a9b282fb12ff3)
 - 2026-08-21 19:28: Enabled all reviewed Driver capabilities in both modes and documented state-aware IAM, structural production Compute, and honestly scoped production-admission proof. (01a0269c-0551-7f01-9dfc-ffb2a0896c94 - a45b01d258c6a6b10db2301cad3303e2fa520f09)
 - 2026-08-21 17:28: Consolidated startup into one async Driver bundle, removed hidden module-cache state, and preserved fail-closed factory and integration proof. (01a0269c-0551-7f01-9dfc-ffb2a0896c94 - d17a87541cbebc8e333bd00bd90c42e734d91a80)

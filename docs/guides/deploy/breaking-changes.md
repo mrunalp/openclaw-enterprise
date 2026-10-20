@@ -23,7 +23,7 @@ Configuration an older build stored with a provider or model `baseUrl` that is
 not an absolute `http` or `https` URL (`ftp://models.example/v1`, `/v1`,
 `https:/v1`), an `api` the runtime does not support, or a header name that is
 not a valid HTTP field name used to deploy, and then failed at the model probe
-or not at all. Deployment now answers `400` and creates no revision, even for a
+or not at all. Deployment now answers `400` and creates no version, even for a
 provider the Agent does not use. A provisioning attempt queued before the
 upgrade is rejected without retry.
 
@@ -105,19 +105,21 @@ against the CLI and the list response shape, not a live Installation.
 4. Delete the old source. That also stops the gateway refreshing its token
    against the old URL.
 
-## 2026-10-14: Preset and revision lists return summaries; revisions page
+<span id="2026-10-14-preset-and-revision-lists-return-summaries-revisions-page" class="anchor-alias"></span>
+
+## 2026-10-14: Preset and Agent revision lists return summaries and use pages
 
 **What breaks.** `GET .../presets` items carry only `id`, `namespaceId`, `name`
 and `createdAt`, without `template`. `GET .../agents/{agentId}/revisions` items
 carry identity, `configurationId`, `configurationGeneration`, `harness` and
-`createdAt`, without the saved settings or `configurationReadError`. Revisions
+`createdAt`, without the saved settings or `configurationReadError`. Versions
 list newest first, 50 to a page (`limit` up to 100), and `meta.nextCursor`
 names the next page.
 
 **Who is affected.** API clients and scripts (including
 `occ preset list -o json`) that read templates or saved settings from these
-lists, or expect every revision in one response. Operators who run `occ agent revisions` with an `occ`
-built before this change: it exits `0` but prints only the newest 50 revisions,
+lists, or expect every version in one response. Operators who run `occ agent revisions` with an `occ`
+built before this change: it exits `0` but prints only the newest 50 versions,
 with no hint that older ones exist.
 
 **How to tell.** List items lack `template` or `configuration`, and
@@ -125,11 +127,11 @@ with no hint that older ones exist.
 `--cursor` flag, and a full page ends without the `older revisions may exist`
 notice.
 
-**Steps.** Read one Preset or revision by ID for its document
+**Steps.** Read one Preset or version by ID for its document
 (`occ preset get ID -o json`). Pass `meta.nextCursor` back as `cursor` until it is `null`.
 Upgrade `occ` to the release your controller runs
 ([CLI setup](../cli.md#connect-to-your-installation)), then pass the
-`--cursor` each full page prints to read older revisions.
+`--cursor` each full page prints to read older versions.
 
 ## 2026-10-14: every model selection must use the Harness provider
 
@@ -250,6 +252,24 @@ octets with no leading zeros is refused.
 decimal octets`.
 
 **Steps.** Write those four octets, then start again.
+
+## 2026-10-14: gateway hostnames must not be rewritten IPv4
+
+**What breaks.** Helm and Compute refuse rewritten or URL-parser-invalid IPv4 in
+`gatewayRouting.hostname` and harness `routing.hostname`. Sandbox suffix
+`gatewayRouting.sandbox.domain` also refuses canonical IPv4: an Agent label
+cannot precede an address. Nonfinal hex labels remain accepted.
+
+**Who is affected.** Helm values or Installation YAML using those spellings.
+
+**How to tell.** Diagnostics name the invalid field and suggest its correction.
+
+**Steps.** Use a DNS name resolving to the Gateway that its certificate covers;
+the `openclaw-enterprise` chart requests a DNS SAN, not an IP SAN. For harness
+`routing.hostname`, use a name covered by the operator's `routing.tlsSecretName`
+certificate. Use a DNS suffix such as
+`previews.example.test` for sandbox. Correct Helm/Installation values, then upgrade.
+_untested_ against a live Installation.
 
 ## 2026-10-13: image repository paths must be lowercase; no @ before URL hosts
 

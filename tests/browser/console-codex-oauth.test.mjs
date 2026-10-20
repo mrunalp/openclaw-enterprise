@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CodexPluginDriver } from "../../apps/controller/src/drivers/plugin/index.ts";
-import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import {
   createDeviceCredentialDrivers,
   DEVICE_ACCESS_TOKEN,
@@ -14,14 +13,39 @@ import {
   nativeValues,
   newPage,
 } from "./console-agents-browser-helpers.mjs";
+import { createReadyConsoleNamespace } from "./console-ready-namespace.mjs";
+
+// The fixture's login asks the Console to poll every 5 s, and the API refuses an earlier poll.
+// Each ready login moves both clocks past that interval instead of waiting it out.
+const DEVICE_POLL_MS = 5_000;
+
+async function signInReady(page, advanceApiClock) {
+  await page.getByRole("button", { name: "Sign in with OAuth", exact: true }).click();
+  // The pending view schedules the poll in the same update that shows this status. A later
+  // re-render restarts that timer, and a jump from the current time still covers it.
+  await page
+    .getByText("Waiting for you to complete sign-in in the other tab…", { exact: true })
+    .waitFor();
+  advanceApiClock(DEVICE_POLL_MS);
+  await page.clock.fastForward(DEVICE_POLL_MS);
+  await page
+    .getByText(
+      "ChatGPT login ready. Clearing this selection leaves the saved credential source available.",
+      { exact: true },
+    )
+    .waitFor();
+}
 
 test("Codex OAuth console saves a credential source and reuses it for plugin editing", async (t) => {
-  const fixture = await createConsoleAppFixture(t, {
+  let apiClockAheadMs = 0;
+  const advanceApiClock = (ms) => {
+    apiClockAheadMs += ms;
+  };
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "OAuth console", {
     provisionedPeople: [],
     agentProvisioning: true,
+    now: () => new Date(Date.now() + apiClockAheadMs),
   });
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("OAuth console", { ready: true });
   const installation = await fixture.request("GET", "/installation");
   assert.deepEqual(installation.data.capabilities.agentProvisioning.executionModes, ["dedicated"]);
   const driver = new CodexPluginDriver();
@@ -82,16 +106,56 @@ test("Codex OAuth console saves a credential source and reuses it for plugin edi
   });
   const { page } = await newPage(t, fixture);
   const requests = apiRequests(page, fixture.origin);
+  await page.clock.install();
   await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
   await page.getByRole("button", { name: "Start without Preset" }).click();
   await page.getByLabel("Authentication method").selectOption("credential_source");
   assert.equal(await page.getByLabel("API key Secret", { exact: true }).isVisible(), false);
+  // The Console polls only after the interval the login asks for, and follows a longer one a
+  // poll answer asks for, as a provider's slow_down does (finding 1651). Each poll is held, so
+  // one sent early leaves the busy status shown when the clock stops short of the interval.
+  await page.clock.pauseAt(new Date((await page.evaluate(() => Date.now())) + 1_000));
+  let polls = 0;
+  let nextPoll = Promise.withResolvers();
+  await page.route("**/device-authorizations/*/poll", async (route) => {
+    polls += 1;
+    nextPoll.resolve(route);
+  });
+  const pollStatus = page.locator(".device-login [role='status']");
+  const waiting = "Waiting for you to complete sign-in in the other tab…";
+  const checking = "Checking Codex login…";
+  async function answerPoll(intervalSeconds) {
+    await page.getByText(checking, { exact: true }).waitFor();
+    const route = await nextPoll.promise;
+    nextPoll = Promise.withResolvers();
+    const response = await route.fetch();
+    const body = await response.json();
+    assert.equal(body.data.status, "pending");
+    assert.equal(body.data.intervalSeconds, 5);
+    body.data.intervalSeconds = intervalSeconds;
+    await route.fulfill({ response, json: body });
+    await page.getByText(waiting, { exact: true }).waitFor();
+  }
   await page.getByRole("button", { name: "Sign in with OAuth", exact: true }).click();
   await page.getByText("CODE-12345", { exact: true }).waitFor();
   assert.equal(
     await page.getByRole("link", { name: "Open Codex sign-in" }).getAttribute("href"),
     "https://auth.openai.com/codex/device",
   );
+  await page.getByText(waiting, { exact: true }).waitFor();
+  await page.clock.fastForward(DEVICE_POLL_MS - 1);
+  assert.equal(await pollStatus.textContent(), waiting);
+  advanceApiClock(DEVICE_POLL_MS);
+  await page.clock.fastForward(1);
+  await answerPoll(10);
+  await page.clock.fastForward(10_000 - 1);
+  assert.equal(await pollStatus.textContent(), waiting);
+  advanceApiClock(10_000);
+  await page.clock.fastForward(1);
+  await answerPoll(5);
+  assert.equal(polls, 2);
+  await page.unroute("**/device-authorizations/*/poll");
+  await page.clock.resume();
   const cancelled = page.waitForResponse(
     (response) =>
       response.request().method() === "DELETE" &&
@@ -103,13 +167,7 @@ test("Codex OAuth console saves a credential source and reuses it for plugin edi
 
   // A ready login provides a source reference; its polling session never becomes Agent auth.
   approved = true;
-  await page.getByRole("button", { name: "Sign in with OAuth", exact: true }).click();
-  await page
-    .getByText(
-      "ChatGPT login ready. Clearing this selection leaves the saved credential source available.",
-      { exact: true },
-    )
-    .waitFor();
+  await signInReady(page, advanceApiClock);
   const started = requests.filter(
     (request) => request.method === "POST" && request.path.endsWith("/device-authorizations"),
   );
@@ -164,7 +222,7 @@ test("Codex OAuth console saves a credential source and reuses it for plugin edi
   const loginsBeforeBrowse = gateway.calls.filter(
     (call) => call.operation === "startDeviceAuthorization",
   ).length;
-  await page.getByRole("button", { name: "Plugins", exact: true }).click();
+  await page.getByRole("tab", { name: "Plugins", exact: true }).click();
   assert.equal(
     await page.getByRole("button", { name: "Sign in with OAuth", exact: true }).count(),
     0,
@@ -222,15 +280,9 @@ test("Codex OAuth console saves a credential source and reuses it for plugin edi
   assert.equal(withOtherSource.status, 200, JSON.stringify(withOtherSource.body));
 
   // Reconnection is a separate, explicit authentication save with a newly completed login.
-  await page.getByRole("button", { name: "Credentials", exact: true }).click();
+  await page.getByRole("tab", { name: "Credentials", exact: true }).click();
   assert.equal(await page.getByLabel("Authentication source").inputValue(), "credential_source");
-  await page.getByRole("button", { name: "Sign in with OAuth", exact: true }).click();
-  await page
-    .getByText(
-      "ChatGPT login ready. Clearing this selection leaves the saved credential source available.",
-      { exact: true },
-    )
-    .waitFor();
+  await signInReady(page, advanceApiClock);
   assert.deepEqual((await fixture.request("GET", agentPath)).data.harnessAuth, originalAuth);
   const saved = page.waitForResponse(
     (response) => response.url().endsWith(agentPath) && response.request().method() === "PATCH",
@@ -272,13 +324,7 @@ test("Codex OAuth console saves a credential source and reuses it for plugin edi
 
   // Clearing a staged selection immediately restores the saved source. A concurrent save
   // must not adopt the cleared source while the session close is still pending.
-  await page.getByRole("button", { name: "Sign in with OAuth", exact: true }).click();
-  await page
-    .getByText(
-      "ChatGPT login ready. Clearing this selection leaves the saved credential source available.",
-      { exact: true },
-    )
-    .waitFor();
+  await signInReady(page, advanceApiClock);
   const releaseDiscard = Promise.withResolvers();
   const slowDiscard = Promise.withResolvers();
   await page.route("**/device-authorizations/*", async (route) => {
@@ -331,9 +377,7 @@ test("Codex OAuth console saves a credential source and reuses it for plugin edi
 });
 
 test("saving ChatGPT OAuth before sign-in names the missing step and sends nothing", async (t) => {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("OAuth save guard", { ready: true });
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "OAuth save guard");
   const agent = await fixture.createAgent(
     namespace.id,
     "OAuth save guard",
@@ -363,9 +407,7 @@ test("saving ChatGPT OAuth before sign-in names the missing step and sends nothi
 });
 
 test("sign-in unavailable at the credential service shows the API cause once", async (t) => {
-  const fixture = await createConsoleAppFixture(t);
-  await fixture.bootstrap();
-  const namespace = await fixture.createNamespace("OAuth unavailable", { ready: true });
+  const { fixture, namespace } = await createReadyConsoleNamespace(t, "OAuth unavailable");
   const { page } = await newPage(t, fixture);
   await login(page, fixture, `/console/agents/new?namespace=${namespace.id}`);
   await page.getByRole("button", { name: "Start without Preset" }).click();

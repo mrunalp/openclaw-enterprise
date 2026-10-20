@@ -77,7 +77,12 @@ interface WorkRow {
   readonly actor_id: string;
   readonly namespace_target: "ready" | "deleted" | null;
   readonly agent_target:
-    "stopped" | "deleted" | "provisioned" | typeof CREDENTIAL_WITHDRAWAL_TARGET | null;
+    | "stopped"
+    | "deleted"
+    | "provisioned"
+    | "sandbox_policy"
+    | typeof CREDENTIAL_WITHDRAWAL_TARGET
+    | null;
   readonly state: ControllerWorkState;
   readonly available_at: Date | string;
   readonly attempt_count: number;
@@ -165,7 +170,7 @@ export function isRepositoryRuntimeRetirementWork(
   );
 }
 
-function repositoryCleanupSql(alias: string): string {
+export function repositoryCleanupSql(alias: string): string {
   return `(${alias}.namespace_target IS NULL AND ${alias}.agent_target IS NULL
     AND (
       (${alias}.agent_id IS NOT NULL
@@ -775,7 +780,10 @@ export class PostgresWorkQueue {
           agentTarget !== null)) ||
         (agentId !== null &&
           revisionId === null &&
-          (namespaceTarget !== null || (agentTarget !== "stopped" && agentTarget !== "deleted"))) ||
+          (namespaceTarget !== null ||
+            (agentTarget !== "stopped" &&
+              agentTarget !== "deleted" &&
+              agentTarget !== "sandbox_policy"))) ||
         (revisionId !== null &&
           (namespaceTarget !== null ||
             (agentTarget !== null && agentTarget !== CREDENTIAL_WITHDRAWAL_TARGET))))

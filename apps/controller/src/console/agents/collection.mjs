@@ -1,13 +1,18 @@
-import { button, element } from "../dom.mjs";
+import { button, element, setText, statusBlock } from "../dom.mjs";
 import { DELETE_CONFIRMATION, keptResourcesText } from "./deletion.mjs";
 import {
+  NAMESPACE_MISSING,
+  NAMESPACE_RECHECK_MS,
   NEUTRAL_DEPLOYMENT_NOTES,
   deploymentOutcome,
   displayDate,
+  hasUnbrokenRun,
   link,
   message,
+  namespaceCreation,
   namespacePath,
   neutralDeploymentOutcome,
+  outcomeLabel,
   shortId,
 } from "./list.mjs";
 import { STOP_CONFIRMATION } from "./stop.mjs";
@@ -53,19 +58,66 @@ function actionIcon(name) {
 
 // Revisions list newest first, one page at a time (finding 1323). A page can be empty when
 // its revisions are not readable to the viewer, so follow the cursor to the newest readable one.
-async function latestReadableRevision(context, path) {
+// Returns it with the rest of its page.
+async function latestReadableRevision(context, path, options) {
   let cursor = null;
   do {
     const page = await context.request(
       cursor ? `${path}?cursor=${encodeURIComponent(cursor)}` : path,
-      { includeMeta: true },
+      { ...options, includeMeta: true },
     );
     if (page.data.length > 0) {
-      return page.data[0];
+      return { latest: page.data[0], page: page.data };
     }
     cursor = page.meta?.nextCursor ?? null;
   } while (cursor);
-  return null;
+  return { latest: null, page: [] };
+}
+
+// The current version, `activeId`, for the Agents list (finding 2093). It is usually on the
+// newest readable page; otherwise it is older or unreadable, so it is read on its own. That page
+// lists only readable versions, so a refusal is remembered like the Agent page's denied reads
+// (an audited 403 per list view otherwise). An unreadable or unread version is null.
+async function currentRevision(context, path, options, activeId, page) {
+  const listed = page.find((revision) => revision.id === activeId);
+  if (!activeId || listed || !page.length) {
+    return listed ?? null;
+  }
+  const activePath = `${path}/${encodeURIComponent(activeId)}`;
+  if (context.deniedReads?.has(activePath)) {
+    return null;
+  }
+  try {
+    return await context.request(activePath, options);
+  } catch (error) {
+    if (error.status === 401) {
+      throw error;
+    }
+    if (error.status === 403) {
+      context.deniedReads?.remember(activePath);
+    }
+    return null;
+  }
+}
+
+// A row's deployment while it is read. The text follows the 250 ms rule, so a read that lands
+// sooner, as most do on a return to a retained list, never paints it (finding 1656). Text that a
+// focusable holder wraps stays readable to a screen reader meanwhile.
+const readingDeployment = (className = "delayed-status") =>
+  element("span", { className }, "Reading deployment…");
+// A row's current version until that read finds its number, on the same 250 ms rule.
+const readingVersion = () => element("span", { className: "delayed-status" }, "Reading version…");
+// With a dozen rows, reads that landed just after the 250 ms rule's delay (console.css
+// .delayed-status and .delayed-text) replaced the text a frame or a few after it showed (16-133
+// ms, finding 1683), so once shown it stays at least READING_SHOWN_MS.
+const READING_SHOWN_MS = 150;
+
+function agentNameLink(item, context) {
+  const node = link(item.name, `agents/${item.id}`, context);
+  if (hasUnbrokenRun(item.name)) {
+    node.classList.add("agent-name-unbroken");
+  }
+  return node;
 }
 
 export function renderAgentList(context) {
@@ -79,6 +131,7 @@ export function renderAgentList(context) {
   });
   search.value = context.drafts.get("agent-search") ?? "";
   context.drafts.track("agent-search", () => search.value || undefined);
+  context.drafts.unsavedWhen("agent-search", () => false);
   const rows = element("div");
   const feedback = element("div", { className: "agent-list-feedback" });
   const deployments = new Map();
@@ -96,17 +149,48 @@ export function renderAgentList(context) {
   // enabled and then refused, and the note never pushes the table down (finding 1517). Gating
   // only: the API still authorizes creation, so an unknown answer keeps the control.
   const createDenied = context.permissions?.agents?.create === false;
+  // A Namespace that is not ready names its status here, so the first sign is never a refused
+  // Secret or submit, and one that takes no new Agent never invites creating one (finding 1895).
+  let notReady = namespaceCreation(context.namespace);
   const create = button("Create Agent", () => context.navigate("agents/new"), {
-    className: "primary",
+    tone: "primary",
   });
-  create.disabled = createDenied;
+  // A disabled Create Agent names its reason (UX plan A2), and a provisioning Namespace still
+  // takes drafts, so Create Agent stays enabled and says why nothing deploys yet (finding 1990).
+  const describeCreate = () => {
+    create.disabled = createDenied || notReady?.blocked === true;
+    const reasons = [
+      ...(createDenied ? ["agents-create-denied"] : []),
+      ...(notReady ? ["namespace-not-ready"] : []),
+    ];
+    if (reasons.length) {
+      create.setAttribute("aria-describedby", reasons.join(" "));
+    } else {
+      create.removeAttribute("aria-describedby");
+    }
+  };
+  describeCreate();
+  // The Namespace status block (dom.mjs statusBlock's markup), a polite status on load.
+  const namespaceNote = (tone, text) =>
+    element(
+      "p",
+      {
+        className: "status",
+        "data-tone": tone,
+        role: "status",
+        ...(tone === "warning" ? { id: "namespace-not-ready" } : {}),
+      },
+      text,
+    );
+  let notReadyNote = notReady ? namespaceNote("warning", notReady.note) : null;
   view.replaceChildren(
     element("div", { className: "agent-toolbar" }, search, create),
+    ...(notReadyNote ? [notReadyNote] : []),
     ...(createDenied
       ? [
           element(
             "p",
-            { className: "muted", role: "status" },
+            { className: "muted", role: "status", id: "agents-create-denied" },
             "Your access does not include creating Agents in this Namespace.",
           ),
         ]
@@ -114,19 +198,152 @@ export function renderAgentList(context) {
     feedback,
     rows,
   );
-
-  const agentPath = (id) =>
+  // Each row's latest deployment, read after the list paints. A return to a retained list
+  // revalidates only the list's own reads, so these never hold its reveal (finding 1644); the
+  // retained rows read them again in place instead. So one still running doesn't keep the list
+  // from being retained either (finding 1663): leaving aborts it, and the list rereads it.
+  const cells = new Map(); // The shown rows' deployment cells, each with its Agent.
+  const rowRead = { revalidate: false, rereadOnResume: true };
+  // The row's revisions read, then its latest deployment and its current version side by side.
+  function readDeployment(item) {
+    const agentPath = `${namespacePath(context.namespaceId)}/agents/${encodeURIComponent(item.id)}`;
+    const revisions = latestReadableRevision(context, `${agentPath}/revisions`, rowRead);
+    return {
+      current: revisions.then(({ page }) =>
+        currentRevision(context, `${agentPath}/revisions`, rowRead, item.activeRevisionId, page),
+      ),
+      deployment: revisions.then(async ({ latest }) => {
+        if (!latest) {
+          return null;
+        }
+        const status = await context.request(
+          `${agentPath}/deployments/${encodeURIComponent(latest.id)}`,
+          rowRead,
+        );
+        return { revision: latest, status };
+      }),
+    };
+  }
+  // A read that lands before a cell's reading text shows, or after it has shown long enough,
+  // fills the cell now; otherwise once it has. The text shows in the frame its delay animation
+  // ends in, not render time plus the delay: the animation starts with the frame that first styles
+  // the text, which can be a frame or two either side of the render, so that estimate let a read
+  // landing between the two fill the cell one frame after the text painted (finding 1716). A later
+  // resume or render replaces the text, and its own read fills the cell instead.
+  function fillAfterReading(reading, apply) {
+    let shownAt;
+    reading?.addEventListener("animationend", () => {
+      shownAt = performance.now();
+    });
+    return (...content) => {
+      const wait = shownAt === undefined ? 0 : shownAt + READING_SHOWN_MS - performance.now();
+      if (wait <= 0) {
+        apply(...content);
+        return;
+      }
+      setTimeout(() => {
+        if (context.isCurrent() && reading.isConnected) {
+          apply(...content);
+        }
+      }, wait);
+    };
+  }
+  // Fills a row's deployment cell. Focus in the cell moves to its new link, or to the row's Agent
+  // link when it has none.
+  function fillDeployment(deployment, ...content) {
+    const focused = deployment.contains(deployment.ownerDocument.activeElement);
+    deployment.replaceChildren(...content);
+    if (focused) {
+      (deployment.querySelector("a") ?? deployment.closest("tr")?.querySelector("a"))?.focus({
+        preventScroll: true,
+      });
+    }
+  }
+  // Fills a row's Current version cell: the version's number once its row's read finds it, else
+  // its ID as before, for a current version the reader cannot read (finding 2093).
+  function fillCurrent(current, item, active) {
+    if (!item.activeRevisionId) {
+      return;
+    }
+    const label = active ? `v${active.revision}` : shortId(item.activeRevisionId);
+    const shown = current.querySelector("a");
+    if (shown) {
+      setText(shown, label);
+      shown.classList.toggle("agent-revision-link", !active);
+      return;
+    }
+    const version = link(label, `agents/${item.id}?revision=${item.activeRevisionId}`, context);
+    version.classList.toggle("agent-revision-link", !active);
+    current.replaceChildren(version);
+  }
+  function showDeployment(item, deployment, current) {
+    if (!deployments.has(item.id)) {
+      deployments.set(item.id, readDeployment(item));
+    }
+    const reads = deployments.get(item.id);
+    // The cell's "Reading deployment…" (or its focusable holder).
+    const fill = fillAfterReading(deployment.firstElementChild, (...content) =>
+      fillDeployment(deployment, ...content),
+    );
+    const fillVersion = fillAfterReading(current.querySelector(".delayed-status"), (active) =>
+      fillCurrent(current, item, active),
+    );
+    void reads.current.then(
+      (active) => context.isCurrent() && fillVersion(active),
+      () => context.isCurrent() && fillVersion(null),
+    );
+    void reads.deployment
+      .then((result) => {
+        if (!context.isCurrent()) {
+          return;
+        }
+        if (result === null) {
+          fill("No visible deployments");
+          return;
+        }
+        const neutral = neutralDeploymentOutcome(result.status);
+        const failure =
+          !neutral && result.status.status === "failed"
+            ? (result.status.error?.message ?? "Deployment failed.")
+            : null;
+        // A long failure fits one line; its title and the Agent page give the whole text.
+        fill(
+          link(
+            `v${result.revision.revision} · ${outcomeLabel(deploymentOutcome(result.status))}`,
+            `agents/${item.id}?revision=${result.revision.id}`,
+            context,
+          ),
+          element(
+            "span",
+            {
+              className: "resource-id agent-deployment-note",
+              ...(failure ? { title: failure } : {}),
+            },
+            failure ??
+              (neutral ? `${NEUTRAL_DEPLOYMENT_NOTES[neutral]}.` : "Serving health unverified"),
+          ),
+        );
+      })
+      .catch((error) => {
+        // A read the list's reset aborted fails here; it never paints the list it left.
+        if (!context.isCurrent()) {
+          return;
+        }
+        fill(error.status === 403 ? "Deployment access denied" : "Deployment unavailable");
+      });
+  }
+  const agentRequestPath = (id) =>
     `${namespacePath(context.namespaceId)}/agents/${encodeURIComponent(id)}`;
 
   function showOutcome({ notice, error, requestId }) {
     feedback.replaceChildren(
-      ...(notice ? [element("p", { className: "notice", role: "status" }, notice)] : []),
+      ...(notice ? [statusBlock("info", null, notice)] : []),
       ...(error
         ? [
             element(
               "div",
-              { className: "error", role: "alert" },
-              element("p", {}, error),
+              { className: "status", "data-tone": "danger", role: "alert" },
+              element("p", { className: "status-body" }, error),
               requestId
                 ? element("p", { className: "request-id" }, `Request ID: ${requestId}`)
                 : null,
@@ -156,18 +373,23 @@ export function renderAgentList(context) {
     }
   }
 
+  const restricts = (answer) => answer?.operate === false || answer?.delete === false;
+
+  // Read like the rows' deployments (rowRead), so these never hold a retained list's reveal; a
+  // resume reads them again.
   function readPermissions(item) {
     if (permissionReads.has(item.id) || item.status === "deleting") {
       return;
     }
     permissionReads.add(item.id);
-    void context.request(`${agentPath(item.id)}/permissions`).then(
+    void context.request(`${agentRequestPath(item.id)}/permissions`, rowRead).then(
       (answer) => {
         if (!context.isCurrent()) {
           return;
         }
+        const previous = permissions.get(item.id);
         permissions.set(item.id, answer);
-        if (answer?.operate === false || answer?.delete === false) {
+        if (restricts(answer) || restricts(previous)) {
           restrictOpenDialog?.(item.id, answer);
           updateRowActions(item.id);
         }
@@ -208,7 +430,9 @@ export function renderAgentList(context) {
 
   async function stopAgent(item) {
     try {
-      const stopped = await context.request(`${agentPath(item.id)}/stop`, { method: "POST" });
+      const stopped = await context.request(`${agentRequestPath(item.id)}/stop`, {
+        method: "POST",
+      });
       if (!context.isCurrent()) {
         return;
       }
@@ -232,7 +456,7 @@ export function renderAgentList(context) {
 
   async function deleteAgent(item) {
     try {
-      const deleting = await context.request(agentPath(item.id), { method: "DELETE" });
+      const deleting = await context.request(agentRequestPath(item.id), { method: "DELETE" });
       if (!context.isCurrent()) {
         return;
       }
@@ -254,7 +478,7 @@ export function renderAgentList(context) {
       ? [STOP_CONFIRMATION]
       : [DELETE_CONFIRMATION, keptResourcesText(item)];
     const dialog = element("dialog", {
-      className: stopping ? "agent-stop-dialog" : "agent-delete-dialog",
+      className: stopping ? "dialog agent-stop-dialog" : "dialog agent-delete-dialog",
       "aria-labelledby": "agent-row-confirm-title",
       "aria-describedby": descriptions
         .map((_, index) => `agent-row-confirm-description-${index}`)
@@ -275,6 +499,8 @@ export function renderAgentList(context) {
         cancel.disabled = true;
         confirm.disabled = true;
         confirm.textContent = stopping ? "Stopping…" : "Deleting…";
+        // Busy, not merely disabled: the progress cursor, and "working" for assistive technology.
+        confirm.setAttribute("aria-busy", "true");
         await (stopping ? stopAgent(item) : deleteAgent(item));
         pending = false;
         dialog.close();
@@ -308,7 +534,7 @@ export function renderAgentList(context) {
         `${stopping ? "Stop" : "Delete"} ${item.name}?`,
       ),
       ...descriptionNodes,
-      element("div", { className: "form-actions" }, cancel, confirm),
+      element("div", { className: "dialog-actions" }, cancel, confirm),
     );
     dialog.addEventListener("cancel", (event) => {
       if (pending) {
@@ -428,6 +654,8 @@ export function renderAgentList(context) {
   }
 
   function render() {
+    cells.clear();
+    rowControls.clear();
     const query = search.value.trim().toLowerCase();
     const matches = items
       .filter((item) => `${item.name} ${item.id}`.toLowerCase().includes(query))
@@ -447,7 +675,13 @@ export function renderAgentList(context) {
                 ? // Under the note above: say what the reader can expect, not invite creating
                   // (finding 1521).
                   "Agents in this Namespace that are shared with you appear here."
-                : "Create an Agent in this Namespace using an editable Configuration template.",
+                : notReady?.blocked
+                  ? context.namespace.status === "provisioning" && !notReady.missing
+                    ? "You can create Agents here once this Namespace is ready."
+                    : "Agents cannot be created in this Namespace."
+                  : notReady
+                    ? "You can save an Agent draft here now. It can be deployed once this Namespace is ready."
+                    : "Create an Agent in this Namespace using an editable Configuration template.",
           ),
         ),
       );
@@ -473,76 +707,31 @@ export function renderAgentList(context) {
       ),
     );
     const body = element("tbody");
-    rowControls.clear();
     for (const item of matches) {
       readPermissions(item);
-      const name = link(item.name, `agents/${item.id}`, context);
+      const name = agentNameLink(item, context);
       const actions = rowActions(item);
       const cell = element(
         "td",
-        { className: "agent-row-actions-cell" },
+        { className: "agent-row-actions-cell", "data-label": "Actions" },
         ...actionCellContent(actions),
       );
       rowControls.set(item.id, { name, cell, ...actions });
+      // The current version's number comes with the row's deployment read.
+      const current = element(
+        "td",
+        { className: "agent-current-version", "data-label": "Current version" },
+        item.activeRevisionId ? readingVersion() : "No current version",
+      );
       // The cell keeps its column's width once its read lands, and its outcome link and one
       // note line fit the two lines the Agent cell already gives the row (finding 1488).
-      const deployment = element("td", { className: "agent-deployment" }, "Reading deployment…");
-      if (!deployments.has(item.id)) {
-        deployments.set(
-          item.id,
-          latestReadableRevision(
-            context,
-            `${namespacePath(context.namespaceId)}/agents/${encodeURIComponent(item.id)}/revisions`,
-          ).then(async (latest) => {
-            if (!latest) {
-              return null;
-            }
-            const status = await context.request(
-              `${namespacePath(context.namespaceId)}/agents/${encodeURIComponent(item.id)}/deployments/${encodeURIComponent(latest.id)}`,
-            );
-            return { revision: latest, status };
-          }),
-        );
-      }
-      void deployments
-        .get(item.id)
-        .then((result) => {
-          if (!context.isCurrent()) {
-            return;
-          }
-          if (result === null) {
-            deployment.textContent = "No visible deployments";
-            return;
-          }
-          deployment.replaceChildren(
-            link(
-              `v${result.revision.revision} · ${deploymentOutcome(result.status)}`,
-              `agents/${item.id}?revision=${result.revision.id}`,
-              context,
-            ),
-          );
-          const neutral = neutralDeploymentOutcome(result.status);
-          const failure =
-            !neutral && result.status.status === "failed"
-              ? (result.status.error?.message ?? "Deployment failed.")
-              : null;
-          // A long failure fits one line; its title and the Agent page give the whole text.
-          deployment.append(
-            element(
-              "span",
-              {
-                className: "resource-id agent-deployment-note",
-                ...(failure ? { title: failure } : {}),
-              },
-              failure ??
-                (neutral ? `${NEUTRAL_DEPLOYMENT_NOTES[neutral]}.` : "Serving health unverified"),
-            ),
-          );
-        })
-        .catch((error) => {
-          deployment.textContent =
-            error.status === 403 ? "Deployment access denied" : "Deployment unavailable";
-        });
+      const deployment = element(
+        "td",
+        { className: "agent-deployment", "data-label": "Latest deployment" },
+        readingDeployment(),
+      );
+      cells.set(deployment, { item, current });
+      showDeployment(item, deployment, current);
       body.append(
         element(
           "tr",
@@ -555,7 +744,7 @@ export function renderAgentList(context) {
             item.status === "deleting"
               ? element(
                   "span",
-                  { className: "badge", id: `agent-row-badge-${item.id}` },
+                  { className: "badge", "data-tone": "warning", id: `agent-row-badge-${item.id}` },
                   "Deleting",
                 )
               : null,
@@ -565,39 +754,158 @@ export function renderAgentList(context) {
               item.activeRevisionId
               ? element(
                   "span",
-                  { className: "badge", id: `agent-row-badge-${item.id}` },
+                  { className: "badge", "data-tone": "info", id: `agent-row-badge-${item.id}` },
                   "Stop requested",
                 )
               : null,
             item.configurationReadError
-              ? element("span", { className: "badge" }, "Saved configuration unreadable")
+              ? element(
+                  "span",
+                  { className: "badge", "data-tone": "danger" },
+                  "Saved configuration unreadable",
+                )
               : null,
           ),
-          element("td", {}, item.executionMode === "dedicated" ? "Dedicated" : "Embedded"),
+          // On a phone each cell shows its column's name (console.css, `data-label`).
           element(
             "td",
-            {},
-            item.activeRevisionId
-              ? link(
-                  shortId(item.activeRevisionId),
-                  `agents/${item.id}?revision=${item.activeRevisionId}`,
-                  context,
-                )
-              : "No current version",
+            { "data-label": "Execution mode" },
+            item.executionMode === "dedicated" ? "Dedicated" : "Embedded",
           ),
+          current,
           deployment,
-          element("td", {}, displayDate(item.createdAt)),
+          element("td", { "data-label": "Created" }, displayDate(item.createdAt)),
           cell,
         ),
       );
     }
     table.append(body);
+    // On a phone the rows stack (console.css), and a table part whose CSS display changes can
+    // lose its table role in some browsers. Explicit roles keep the table for screen readers.
+    table.setAttribute("role", "table");
+    for (const [parts, role] of [
+      ["thead, tbody", "rowgroup"],
+      ["tr", "row"],
+      ["th", "columnheader"],
+      ["td", "cell"],
+    ]) {
+      for (const part of table.querySelectorAll(parts)) {
+        part.setAttribute("role", role);
+      }
+    }
     // Row actions redraw the table; keep a narrow viewport's horizontal scroll position.
     const scrollLeft = rows.querySelector(".table-scroll")?.scrollLeft ?? 0;
     const scroller = element("div", { className: "table-scroll" }, table);
     rows.replaceChildren(scroller);
     scroller.scrollLeft = scrollLeft;
   }
+  // A retained list is mounted without rereading its rows' deployments, so what they showed is
+  // not presented as current: each row reads its deployment again from "Reading deployment…",
+  // blank for its first 250 ms. Back from a deployment can focus the pending cell. Keep its
+  // address only to match that return: until the read settles, the previous revision must not
+  // be an active link.
+  context.onResume?.(() => {
+    deployments.clear();
+    permissionReads.clear();
+    for (const [deployment, { item, current }] of cells) {
+      readPermissions(item);
+      // A cell still reading from an earlier resume keeps the address it was given.
+      const shown =
+        deployment.querySelector("a")?.href ??
+        deployment.querySelector("[data-return-focus-href]")?.dataset.returnFocusHref;
+      deployment.replaceChildren(
+        shown
+          ? element(
+              "span",
+              { tabindex: "-1", "data-return-focus-href": shown },
+              readingDeployment("delayed-text"),
+            )
+          : readingDeployment(),
+      );
+      showDeployment(item, deployment, current);
+    }
+  });
   search.addEventListener("input", render);
   render();
+  // A provisioning Namespace becomes ready on its own. A refocus, return or Refresh rebuilds the
+  // list, but a reader who stayed on it kept seeing "Provisioning" (finding 2058). While the note
+  // waits on provisioning, reread the Namespace at Create Agent's cadence and, as Create Agent
+  // does, update the note and the gate in place, so search text and focus stay (findings 2012,
+  // 2024). A hidden tab reads nothing; the next check after it shows again does.
+  if (context.namespace?.status === "provisioning") {
+    let timer = null;
+    let reading = false;
+    // `null` is a complete list without the Namespace: deleted, or the reader lost access.
+    const showNamespace = (namespace) => {
+      if (namespace) {
+        context.namespace = namespace;
+      }
+      notReady = namespace ? namespaceCreation(namespace) : NAMESPACE_MISSING;
+      describeCreate();
+      // A ready Namespace says so where the warning was. The list holds no field being edited,
+      // so the note keeps its own height (Create Agent keeps the warning's, finding 2024).
+      const replacement = notReady
+        ? namespaceNote("warning", notReady.note)
+        : namespaceNote(
+            "success",
+            "Namespace status: Ready. Agents created here can be deployed now.",
+          );
+      notReadyNote.replaceWith(replacement);
+      notReadyNote = replacement;
+      // Only the empty state's sentence depends on the Namespace; rows keep their focus.
+      if (!rows.querySelector("table")) {
+        render();
+      }
+    };
+    const recheckNamespace = async () => {
+      timer = null;
+      if (!context.isCurrent() || reading) {
+        return;
+      }
+      if (document.hidden) {
+        waitForNamespace();
+        return;
+      }
+      reading = true;
+      let namespaces = null;
+      try {
+        namespaces = await context.request("/namespaces", {
+          revalidate: false,
+          rereadOnResume: true,
+        });
+      } catch {
+        // A failed read changes nothing on screen; the next check comes at the usual cadence.
+      } finally {
+        reading = false;
+      }
+      if (!context.isCurrent()) {
+        return;
+      }
+      const namespace = namespaces?.find((item) => item.id === context.namespaceId);
+      // A list without the Namespace ends the wait: waiting changes nothing, so the note says so
+      // and Create Agent is disabled, as on Create Agent (finding 2081).
+      if (namespaces && !namespace) {
+        showNamespace(null);
+        return;
+      }
+      if (namespace && namespace.status !== context.namespace.status) {
+        showNamespace(namespace);
+      }
+      if (context.namespace.status === "provisioning") {
+        waitForNamespace();
+      }
+    };
+    const waitForNamespace = () => {
+      if (timer === null) {
+        timer = setTimeout(() => void recheckNamespace(), NAMESPACE_RECHECK_MS);
+      }
+    };
+    waitForNamespace();
+    // A retained list comes back with its timer stopped, as Create Agent's does.
+    context.onResume?.(() => {
+      if (context.namespace?.status === "provisioning" && !notReady?.missing) {
+        waitForNamespace();
+      }
+    });
+  }
 }

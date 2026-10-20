@@ -3,12 +3,14 @@ import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import { openShellLogDecision } from "../../apps/controller/src/drivers/sandbox/openshell-log-decisions.ts";
 import { createConsoleAppFixture } from "../helpers/console-app.mjs";
 import { grantRole } from "../helpers/iam-grants.mjs";
 import { createRuntimeLogComputeDriver } from "../helpers/runtime-logs.mjs";
 import {
   apiRequests,
   detailUrl,
+  fileBrowser,
   holdRequests,
   login,
   nativeValues,
@@ -65,6 +67,9 @@ function succeededDeployment(namespace, agent, revisionId) {
     }),
   };
 }
+
+// The locale cases open one context each in a single Chromium instead of launching ten.
+const browser = fileBrowser();
 
 const atBottom = (node) => node.scrollTop + node.clientHeight >= node.scrollHeight - 24;
 
@@ -124,7 +129,7 @@ test("a failed deployment's Logs link opens its version in view without reloadin
     await pane.getByText("startup failed before activation").waitFor();
     assert.equal(await page.evaluate(() => globalThis.document.logsNavigationMarker), true);
     await page.waitForFunction(() => {
-      const tab = globalThis.document.querySelector('.agent-tabs button[aria-current="page"]');
+      const tab = globalThis.document.querySelector('.agent-tabs button[aria-selected="true"]');
       const panel = globalThis.document.querySelector(".agent-logs");
       if (!tab || !panel) {
         return false;
@@ -162,7 +167,7 @@ for (const viewport of [
     );
     await page.getByRole("heading", { name: "Configuration snapshot", exact: true }).waitFor();
     await page.locator('.content [aria-live="polite"][aria-busy="false"]').waitFor();
-    const logsTab = page.getByRole("button", { name: "Logs", exact: true });
+    const logsTab = page.getByRole("tab", { name: "Logs", exact: true });
     // The strip sits in the middle of the viewport, as after reading the overview.
     await page.evaluate(() => {
       const strip = globalThis.document.querySelector(".agent-tabs").getBoundingClientRect();
@@ -230,12 +235,36 @@ test("phone-width routes, resizing and history keep the selected Agent tab visib
     .getByText("phone-width output")
     .waitFor();
 
+  // An emulated resize applies without waiting for a frame, so script can lay the page out at a
+  // size that never renders. A visibility check at 1440 px forces a layout at that width, where
+  // every tab fits, which clamps the strip's scroll to 0. A 390 px resize applied before the next
+  // frame then leaves the strip's ResizeObserver, which reveals the selected tab, nothing to
+  // report: the strip's width at 390 px is the last size it reported (finding 1727). A browser
+  // window's resize reaches the page with a rendered frame, so each resize here waits for the
+  // frame in which the console's observer sees the new width.
+  async function resize(width, height) {
+    await page.setViewportSize({ width, height });
+    const rendered = await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          // Observers report in creation order, so in the same frame this one reports after the
+          // console's.
+          const observer = new globalThis.ResizeObserver(() => {
+            observer.disconnect();
+            resolve(globalThis.innerWidth);
+          });
+          observer.observe(globalThis.document.querySelector(".agent-tabs"));
+        }),
+    );
+    assert.equal(rendered, width);
+  }
+
   async function assertSelectedTabVisible(name) {
-    const selected = page.locator('.agent-tabs button[aria-current="page"]');
+    const selected = page.locator('.agent-tabs button[aria-selected="true"]');
     assert.equal(await selected.textContent(), name);
     await page.waitForFunction(() => {
-      const button = globalThis.document.querySelector('.agent-tabs button[aria-current="page"]');
-      const strip = button.closest("nav").getBoundingClientRect();
+      const button = globalThis.document.querySelector('.agent-tabs button[aria-selected="true"]');
+      const strip = button.closest(".agent-tabs").getBoundingClientRect();
       const bounds = button.getBoundingClientRect();
       // Scroll extents are integer CSS pixels; DOMRects retain subpixels.
       // Keep the visibility check strict beyond that rounding uncertainty.
@@ -246,13 +275,13 @@ test("phone-width routes, resizing and history keep the selected Agent tab visib
   // A direct route has no pointer action to scroll its off-screen selected tab.
   await assertSelectedTabVisible("Logs");
   const output = await page.getByRole("log", { name: "Runtime log output" }).elementHandle();
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await resize(1440, 900);
   await assertSelectedTabVisible("Logs");
   // Resizing the mounted view must also reveal the selection without recreating its panel.
-  await page.setViewportSize({ width: 390, height: 844 });
+  await resize(390, 844);
   await assertSelectedTabVisible("Logs");
   assert.equal(await output.evaluate((node) => node.isConnected), true);
-  await page.getByRole("button", { name: "Configuration", exact: true }).click();
+  await page.getByRole("tab", { name: "Configuration", exact: true }).click();
   await page.getByText("View admitted native configuration", { exact: true }).click();
   await waitForIdleFetches(page);
   const disclosure = await page.locator(".native-document").elementHandle();
@@ -272,16 +301,16 @@ test("phone-width routes, resizing and history keep the selected Agent tab visib
   // A whole view retained for Back must resume observing after its tab strip was detached.
   await page.goBack();
   await page.getByRole("log", { name: "Runtime log output" }).waitFor();
-  await page.setViewportSize({ width: 1440, height: 900 });
+  await resize(1440, 900);
   const strip = await page.locator(".agent-tabs").elementHandle();
   await waitForIdleFetches(page);
   await page.getByRole("link", { name: "← Agents", exact: true }).click();
   await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
   assert.equal(await strip.evaluate((node) => node.isConnected), false);
   await page.goBack();
-  await page.locator('.agent-tabs button[aria-current="page"]:enabled').waitFor();
+  await page.locator('.agent-tabs button[aria-selected="true"]:enabled').waitFor();
   assert.equal(await strip.evaluate((node) => node.isConnected), true);
-  await page.setViewportSize({ width: 390, height: 844 });
+  await resize(390, 844);
   await assertSelectedTabVisible("Logs");
 });
 
@@ -367,8 +396,299 @@ test("the Logs tab shows runtime status, sanitized output and follows with a cur
 
   // Drafts have no runtime and no Logs tab.
   await page.goto(detailUrl(fixture, namespace.id, agent.id, "draft", "logs").href);
-  await page.getByRole("button", { name: "Configuration", exact: true }).waitFor();
-  assert.equal(await page.getByRole("button", { name: "Logs", exact: true }).count(), 0);
+  await page.getByRole("tab", { name: "Configuration", exact: true }).waitFor();
+  assert.equal(await page.getByRole("tab", { name: "Logs", exact: true }).count(), 0);
+});
+
+test("log timestamps distinguish the repeated hour when daylight saving time ends", async (t) => {
+  const { fixture, computeDriver, namespace, agent, revisionId } = await logsFixture(t);
+  computeDriver.state.lines = [
+    { time: "2026-11-01T05:30:00Z", raw: "before the clocks went back" },
+    { time: "2026-11-01T06:30:00Z", raw: "after the clocks went back" },
+  ];
+  const { page } = await newPage(t, fixture, {
+    context: { locale: "en-US", timezoneId: "America/New_York" },
+  });
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, revisionId, "logs"));
+
+  const log = page.getByRole("log", { name: "Runtime log output" });
+  const timestamp = (hasText) =>
+    log.locator(".log-row", { hasText }).locator(".log-time").innerText();
+  assert.match(await timestamp("before the clocks went back"), /1:30:00\s+AM\s+GMT-4$/u);
+  assert.match(await timestamp("after the clocks went back"), /1:30:00\s+AM\s+GMT-5$/u);
+});
+
+// The UTC offset made timestamps wrap onto a second line in the fixed 170 px (150 px at 1100 px
+// and below) time column above 760 px, so every log row took two lines (findings 1681, 1697).
+// In a Logs card under 662 px (a 1000 px window and below, or about 1101-1280 px beside the
+// version list) the message moves below the time instead of shrinking to a sliver. At 521-527 px
+// the phone layout squeezed the time column, and under about 400 px the level beside it did
+// (finding 1844): there the time takes its own line, down to a 320 px window. The column was
+// sized for en-US, so ko-KR wrapped at every width, and es-MX and ar-EG with a long UTC offset
+// (finding 1861): the console now measures the widest timestamp of the locale and time zone,
+// and a cell too narrow for it shrinks the text rather than wrapping it.
+test("log timestamps with their UTC offset stay on one line", async (t) => {
+  const { fixture, computeDriver, namespace } = await logsFixture(t);
+  // 12/31, a two-digit hour: the longest en-US form, with Adelaide's GMT+10:30. The other lines
+  // have another level or a shorter timestamp, and their columns line up with the first.
+  computeDriver.state.lines = [
+    { time: "2026-12-31T02:29:59Z", raw: "longest timestamp" },
+    {
+      time: "2026-01-01T20:00:00Z",
+      raw: JSON.stringify({ level: "error", message: "shorter timestamp" }),
+    },
+    // Lord Howe's GMT+10:30 applies only in the southern winter.
+    { time: "2026-07-31T02:29:59Z", raw: "winter timestamp" },
+  ];
+  // The first case signs in; later contexts start with its session cookie.
+  let signedIn;
+  for (const [index, [locale, timezoneId, shown]] of [
+    ["en-US", "Australia/Adelaide", /^12\/31\/2026, 12:59:59\sPM\sGMT\+10:30$/u],
+    ["en-US", "Asia/Kolkata", /^12\/31\/2026, 7:59:59\sAM\sGMT\+5:30$/u],
+    ["en-US", "America/New_York", /^12\/30\/2026, 9:29:59\sPM\sGMT-5$/u],
+    ["fr-FR", "Europe/Paris", /^31\/12\/2026\s03:29:59\sUTC\+1$/u],
+    ["de-DE", "Europe/Berlin", /^31\.12\.2026,\s03:29:59\sGMT\+1$/u],
+    ["ko-KR", "Asia/Seoul", /^2026\.\s12\.\s31\.\s오전\s11시\s29분\s59초\sGMT\+9$/u],
+    ["ko-KR", "Australia/Adelaide", /^2026\.\s12\.\s31\.\s오후\s12시\s59분\s59초\sGMT\+10:30$/u],
+    ["ar-EG", "Australia/Adelaide", /^٣١\S*\/١٢\S*\/٢٠٢٦،?\s١٢:٥٩:٥٩\sم\sغرينتش\+١٠:٣٠$/u],
+    ["en-AU", "Australia/Lord_Howe", /^31\/12\/2026, 1:29:59\spm\sGMT\+11$/u],
+    ["es-MX", "Australia/Adelaide", /^31\/12\/2026, 12:59:59\sp\.\s?m\.\sGMT\+10:30$/u],
+  ].entries()) {
+    // Each case reads its own Agent's logs: one Agent's reads are rate limited per principal
+    // (burst 10, then 2 a second), and ten cases in one Chromium read faster than that.
+    const agent = await fixture.createAgent(
+      namespace.id,
+      `Logs Agent ${index}`,
+      nativeValues("v1"),
+    );
+    const { revision } = await fixture.seedActiveAgentRevision(namespace.id, agent.id);
+    const { page } = await newPage(t, fixture, {
+      browser,
+      context: {
+        locale,
+        timezoneId,
+        ...(signedIn === undefined ? {} : { storageState: signedIn }),
+      },
+    });
+    const url = detailUrl(fixture, namespace.id, agent.id, revision.id, "logs");
+    if (signedIn === undefined) {
+      await login(page, fixture, url);
+      signedIn = await page.context().storageState();
+    } else {
+      await page.goto(url.href);
+    }
+    const log = page.getByRole("log", { name: "Runtime log output" });
+    const time = log.locator(".log-row", { hasText: "longest timestamp" }).locator(".log-time");
+    assert.match(await time.innerText(), shown);
+    await log.getByText("winter timestamp").waitFor();
+    for (const width of [
+      1440, 1300, 1200, 1101, 1100, 1001, 1000, 761, 760, 662, 600, 527, 524, 521, 520, 480, 404,
+      402, 397, 390, 360, 320,
+    ]) {
+      await page.setViewportSize({ width, height: 900 });
+      const where = `${locale} ${timezoneId} at ${width}px`;
+      // One read of the laid-out pane per width: 220 cases, so round trips set the test's time.
+      const seen = await log.evaluate((pane) => {
+        const all = (selector) => [...pane.querySelectorAll(selector)];
+        const cells = all(".log-time");
+        const longest = all(".log-row")
+          .find((row) => row.textContent.includes("longest timestamp"))
+          ?.querySelector(".log-time");
+        if (!longest) {
+          throw new Error("no time cell in the longest timestamp's row");
+        }
+        const content = longest.closest(".log-line").querySelector(".log-content");
+        const box = content.getBoundingClientRect();
+        return {
+          cells: cells.map((cell) => {
+            const range = cell.ownerDocument.createRange();
+            range.selectNodeContents(cell);
+            const rects = [...range.getClientRects()];
+            const box = cell.getBoundingClientRect();
+            return {
+              text: cell.textContent,
+              lines: new Set(rects.map((rect) => Math.round(rect.top))).size,
+              left: Math.min(...rects.map((rect) => rect.left)) - box.left,
+              right: box.right - Math.max(...rects.map((rect) => rect.right)),
+            };
+          }),
+          starts: Object.fromEntries(
+            [".log-time", ".log-level", ".log-origin"].map((column) => [
+              column,
+              all(column).map((cell) => cell.getBoundingClientRect().left),
+            ]),
+          ),
+          times: cells.map((cell) => {
+            const { width } = cell.getBoundingClientRect();
+            return `${width} ${cell.ownerDocument.defaultView.getComputedStyle(cell.firstElementChild).fontSize}`;
+          }),
+          overflow: pane.scrollWidth > pane.clientWidth,
+          message: {
+            beside: box.top < longest.getBoundingClientRect().bottom,
+            width: box.width,
+          },
+        };
+      });
+      assert.equal(seen.cells.length, 3);
+      for (const cell of seen.cells) {
+        assert.equal(cell.lines, 1, `one line for ${cell.text}, ${where}`);
+        // The text stays inside its cell, so it never runs into the level beside it.
+        assert.ok(
+          cell.left >= -0.5 && cell.right >= -0.5,
+          `${cell.text} inside its cell, ${where}`,
+        );
+      }
+      // Rows with different levels and timestamp lengths keep one time width and font size.
+      for (const [column, starts] of Object.entries(seen.starts)) {
+        assert.equal(new Set(starts).size, 1, `${column} aligned, ${where}`);
+      }
+      assert.equal(new Set(seen.times).size, 1, `one time width and size, ${where}: ${seen.times}`);
+      assert.ok(!seen.overflow, `no horizontal log overflow, ${where}`);
+      // A message beside the time keeps about 200 px (196 px beside en-US's at a 662 px card);
+      // beside a longer timestamp, in a card up to 762 px, it moves below.
+      assert.ok(
+        !seen.message.beside || seen.message.width >= 195,
+        `message ${seen.message.width}px wide beside the time, ${where}`,
+      );
+    }
+  }
+});
+
+// Each Logs pane probed 288 timestamps to size its time column, although the width depends
+// only on the locale, time zone and font: 2-9 ms per pane, a 78 ms long task in ar-EG without an
+// Arabic font (finding 1867). Later panes reuse the first measurement.
+test("later Logs panes reuse the measured time column width", async (t) => {
+  const { fixture, computeDriver, namespace, agent, revisionId } = await logsFixture(t);
+  computeDriver.state.lines = [{ time: "2026-12-31T02:29:59Z", raw: "longest timestamp" }];
+  const { page } = await newPage(t, fixture, {
+    context: { locale: "ko-KR", timezoneId: "Australia/Adelaide" },
+  });
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, revisionId, "logs"));
+  const log = page.getByRole("log", { name: "Runtime log output" });
+  await log.getByText("longest timestamp").waitFor();
+  const reused = await log.evaluate(async (shown) => {
+    // The module instance the page runs, not a second copy.
+    const url = globalThis.performance
+      .getEntriesByType("resource")
+      .find((entry) => new URL(entry.name).pathname.endsWith("/agents/logs-view.mjs")).name;
+    const { fitLogTimeColumn } = await import(url);
+    let probes = 0;
+    const observer = new globalThis.MutationObserver((records) => {
+      for (const record of records) {
+        for (const node of record.addedNodes) {
+          probes += node.classList?.contains("log-time-probe") ? 1 : 0;
+        }
+      }
+    });
+    observer.observe(globalThis.document.body, { childList: true, subtree: true });
+    // What sizes the column: its width, the text in 11px ems, and the long-time layout.
+    const sizing = (pane) => [
+      pane.style.getPropertyValue("--log-time-width"),
+      pane.style.getPropertyValue("--log-time-ems"),
+      pane.hasAttribute("data-long-time"),
+    ];
+    const panes = [];
+    for (let index = 0; index < 2; index += 1) {
+      const pane = globalThis.document.createElement("div");
+      pane.className = "log-pane";
+      shown.after(pane);
+      panes.push([fitLogTimeColumn(pane), ...sizing(pane)]);
+      pane.remove();
+    }
+    const missed = observer.takeRecords();
+    observer.disconnect();
+    for (const record of missed) {
+      for (const node of record.addedNodes) {
+        probes += node.classList?.contains("log-time-probe") ? 1 : 0;
+      }
+    }
+    return { probes, panes, shown: sizing(shown) };
+  });
+  // ko-KR with GMT+10:30 is wider than en-US, so the long-time layout applies too.
+  assert.equal(reused.shown[2], true);
+  assert.deepEqual(reused, {
+    probes: 0,
+    panes: [
+      [true, ...reused.shown],
+      [true, ...reused.shown],
+    ],
+    shown: reused.shown,
+  });
+});
+
+// Above 1100 px the Logs card sits beside the version list, narrower than at 1001-1100 px.
+// Breakpoints on the window squeezed the message column to 0 px at 1101 px, one character per
+// line (finding 1713); the rows now follow the card's width. The test above keeps timestamps whole.
+test("the log message column stays readable beside the version list", async (t) => {
+  const { fixture, computeDriver, namespace, agent, revisionId } = await logsFixture(t);
+  computeDriver.state.lines = [
+    { time: "2026-12-31T02:29:59Z", raw: "failed to resolve remote control preferences" },
+  ];
+  const { page } = await newPage(t, fixture, {
+    context: { locale: "en-US", timezoneId: "Australia/Adelaide" },
+  });
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, revisionId, "logs"));
+  const log = page.getByRole("log", { name: "Runtime log output" });
+  await log.getByText("failed to resolve remote control preferences").waitFor();
+  for (const width of [390, 1000, 1101, 1200, 1300, 1440]) {
+    await page.setViewportSize({ width, height: 900 });
+    const message = await log
+      .locator(".log-content")
+      .evaluate((cell) => cell.getBoundingClientRect().width);
+    assert.ok(message >= 200, `message column ${message}px wide at ${width}px`);
+  }
+});
+
+test("log levels stay on one line and keep log columns aligned", async (t) => {
+  const { fixture, computeDriver, namespace, agent, revisionId } = await logsFixture(t);
+  const levels = ["error", "warn", "info", "debug"];
+  computeDriver.state.lines = [
+    ...levels.map((level, i) =>
+      line(i, JSON.stringify({ level, subsystem: "gateway", message: level + " message" })),
+    ),
+    line(4, "plain output with a long token " + "x".repeat(160)),
+  ];
+  const { page } = await newPage(t, fixture);
+  await login(page, fixture, detailUrl(fixture, namespace.id, agent.id, revisionId, "logs"));
+  const pane = page.getByRole("log", { name: "Runtime log output" });
+  await pane.getByText("error message", { exact: true }).waitFor();
+  await page.getByLabel("Include debug").check();
+  await pane.getByText("debug message", { exact: true }).waitFor();
+
+  for (const width of [320, 390, 524, 700, 780, 900, 1280]) {
+    await page.setViewportSize({ width, height: 844 });
+    const fittingLevels = await pane.locator(".log-level").evaluateAll((badges) =>
+      badges.flatMap((badge) => {
+        const range = badge.ownerDocument.createRange();
+        range.selectNodeContents(badge);
+        const [word, wrapped] = range.getClientRects();
+        const box = badge.getBoundingClientRect();
+        return !wrapped && word.left >= box.left && word.right <= box.right
+          ? [badge.textContent]
+          : [];
+      }),
+    );
+    // Plain output has no declared level; its UNKNOWN label needs to fit, too.
+    assert.deepEqual(
+      fittingLevels,
+      [...levels, "unknown"],
+      "whole level labels at " + width + "px",
+    );
+    for (const column of [".log-origin", ".log-content"]) {
+      const starts = await pane
+        .locator(column)
+        .evaluateAll((cells) => cells.map((cell) => cell.getBoundingClientRect().left));
+      assert.equal(
+        new Set(starts).size,
+        1,
+        column + " stays aligned across log levels at " + width + "px",
+      );
+    }
+    assert.ok(
+      await pane.evaluate((log) => log.scrollWidth <= log.clientWidth),
+      "no horizontal log overflow",
+    );
+  }
 });
 
 test("invisible and bidirectional characters in log text show as visible escapes", async (t) => {
@@ -531,6 +851,99 @@ test("an unchanged runtime status poll leaves the status strip and pickers untou
   await page.clock.runFor(10_000);
   await strip.getByText("4", { exact: true }).first().waitFor();
   assert.ok((await page.evaluate(() => globalThis.statusRewrites.length)) > 0);
+});
+
+test("a status poll that changes the log source starts its tail; retaining the source spends no read", async (t) => {
+  const logs = await logsFixture(t);
+  const state = logs.computeDriver.state;
+  state.harnessPod = { ready: true };
+  state.harnessLines = [line(1, "output from the selected Agent")];
+  state.lines = [line(2, "output from the remaining Gateway")];
+  const { page, requests } = await openRetainedLogs(t, logs, logs.fixture.credentials);
+  const source = page.locator("#runtime-log-source");
+  const pane = page.getByRole("log", { name: "Runtime log output" });
+  await source.selectOption("agent");
+  const agentLine = pane.getByText("output from the selected Agent");
+  await agentLine.waitFor();
+  const reads = () => logRequests(requests, logs.revisionId);
+  const before = reads().length;
+
+  // The status changes, but the selected Agent stream still exists.
+  state.extraPods = [{ name: "another-gateway-pod", uid: randomUUID() }];
+  await page.clock.runFor(10_000);
+  await page.locator(".runtime-pod").getByText("another-gateway-pod").waitFor();
+  await waitForIdleFetches(page);
+  assert.equal(await source.inputValue(), "agent");
+  assert.equal(await agentLine.isVisible(), true);
+  assert.equal(reads().length, before);
+
+  // The Agent Pod goes away. The picker already falls back to Gateway; the output must too.
+  state.harnessPod = { created: false };
+  await page.clock.runFor(10_000);
+  await source.locator('option[value="agent"]:disabled').waitFor({ state: "attached" });
+  await waitForIdleFetches(page);
+  assert.equal(await source.inputValue(), "gateway");
+  const next = reads().slice(before);
+  assert.equal(next.length, 1, "read the new source once");
+  const { searchParams } = new URL(next[0].path, logs.fixture.origin);
+  assert.equal(searchParams.get("source"), "gateway");
+  assert.equal(searchParams.get("tailLines"), "200");
+  assert.equal(searchParams.has("cursor"), false);
+  assert.equal(await agentLine.count(), 0);
+  await pane.getByText("output from the remaining Gateway").waitFor();
+});
+
+test("a status poll that replaces the selected Pod drops even an in-flight page from it", async (t) => {
+  const logs = await logsFixture(t);
+  const state = logs.computeDriver.state;
+  const old = { name: "gateway-before-rollout", uid: randomUUID() };
+  state.extraPods = [old];
+  const { page, requests } = await openRetainedLogs(t, logs, logs.fixture.credentials);
+  const picker = page.locator("#runtime-log-pod");
+  const pane = page.getByRole("log", { name: "Runtime log output" });
+  state.readPodUid = old.uid;
+  state.lines = [line(1, "output from the selected Pod")];
+  await picker.selectOption({ label: old.name + " / gateway" });
+  const oldLine = pane.getByText("output from the selected Pod");
+  await oldLine.waitFor();
+
+  const url = "**/runtime/logs?*cursor=*";
+  const held = await holdRequests(t, page, url, { once: true, afterServer: true });
+  const late = "last output from the old Pod";
+  state.lines.push(line(2, late));
+  await page.getByRole("button", { name: "Follow", exact: true }).click();
+  await page.clock.runFor(2_000);
+  await held.requested;
+  const reads = () => logRequests(requests, logs.revisionId);
+  const before = reads().length;
+  await watchPainted(page, late);
+
+  state.extraPods = [];
+  delete state.readPodUid;
+  state.lines = [line(3, "first output from the remaining Pod")];
+  await page.clock.runFor(10_000);
+  await picker
+    .getByRole("option", { name: old.name + " / gateway" })
+    .waitFor({ state: "detached" });
+  assert.equal(await oldLine.count(), 0, "do not label the old output as the new selection");
+
+  const delivered = page.waitForResponse(url);
+  held.release();
+  const oldResponse = await delivered;
+  assert.equal(oldResponse.status(), 200);
+  assert.ok((await oldResponse.text()).includes(late), "the old response really arrived");
+  await pane.getByText("first output from the remaining Pod").waitFor();
+  const next = reads().slice(before);
+  assert.equal(next.length, 1, "read the replacement Pod once");
+  const { searchParams } = new URL(next[0].path, logs.fixture.origin);
+  assert.equal(searchParams.has("cursor"), false);
+  assert.equal(searchParams.get("tailLines"), "200");
+  assert.deepEqual(JSON.parse(await picker.inputValue()), [searchParams.get("pod"), "gateway"]);
+  assert.deepEqual(
+    await page.evaluate(() => globalThis.__painted),
+    [],
+    "the old response never repainted",
+  );
 });
 
 test("a rejected cursor starts one new view and later restarts wait for it", async (t) => {
@@ -718,6 +1131,13 @@ test("an operator without administer sees status but no log text and is never re
   assert.equal(await page.getByRole("button", { name: "Refresh logs" }).isDisabled(), true);
   const denied = logRequests(requests, revisionId).length;
   assert.equal(denied, 1);
+  // Log text was never allowed, so the refusal revokes nothing: status is not asked again at
+  // once (finding 1597's re-ask is for a revocation).
+  await settlePageRequests(page);
+  assert.equal(
+    requests.filter(({ path }) => path.endsWith(`/deployments/${revisionId}/runtime`)).length,
+    1,
+  );
   // Status keeps polling every 10 s; the denied log view is not requested again.
   await waitForCondition(
     () =>
@@ -862,8 +1282,8 @@ test("a log reader without operate reads log text in the Logs tab without runtim
   const statusReads = () =>
     requests.filter(({ path }) => path.endsWith(`/deployments/${revisionId}/runtime`)).length;
   const before = statusReads();
-  await page.getByRole("button", { name: "Configuration", exact: true }).click();
-  await page.getByRole("button", { name: "Logs", exact: true }).click();
+  await page.getByRole("tab", { name: "Configuration", exact: true }).click();
+  await page.getByRole("tab", { name: "Logs", exact: true }).click();
   await pane.getByText("log reader can see this").waitFor();
   assert.equal(await page.locator("#runtime-log-source").isDisabled(), false);
   assert.equal(statusReads(), before);
@@ -896,6 +1316,246 @@ test("the Logs tab explains cluster RBAC, unsupported Drivers and unavailable re
     .waitFor();
 });
 
+const rateLimitRequestId = "req_12345678-1234-1234-1234-123456789abc";
+
+function rateLimitedResponse(retryAfter) {
+  return {
+    status: 429,
+    contentType: "application/json",
+    headers: retryAfter ? { "Retry-After": String(retryAfter) } : {},
+    body: JSON.stringify({
+      error: {
+        code: "RUNTIME_LOGS_RATE_LIMITED",
+        message: "Too many runtime log requests. Wait for Retry-After and try again.",
+      },
+      meta: { requestId: rateLimitRequestId },
+    }),
+  };
+}
+
+async function logsBeforeRateLimit(t) {
+  const logs = await logsFixture(t);
+  logs.computeDriver.state.lines = [line(1, "output before the rate limit")];
+  const { page } = await openRetainedLogs(t, logs);
+  await page.getByRole("log").getByText("output before the rate limit").waitFor();
+  return page;
+}
+
+test("rate-limited manual log reads explain when to retry without reading again", async (t) => {
+  const page = await logsBeforeRateLimit(t);
+  const reads = [];
+  let seconds;
+  await page.route("**/runtime/logs?*", (route) => {
+    reads.push(
+      new URL(route.request().url()).searchParams.has("download") ? "Download" : "Refresh logs",
+    );
+    return route.fulfill(rateLimitedResponse(seconds));
+  });
+
+  for (const [action, retryAfter, advice] of [
+    ["Refresh logs", 7, "Try again in 7 seconds."],
+    ["Download", 1, "Try again in 1 second."],
+    ["Refresh logs", undefined, "Try again shortly."],
+  ]) {
+    seconds = retryAfter;
+    await page.getByRole("button", { name: action }).click();
+    await waitForIdleFetches(page);
+    assert.equal(
+      await page.locator(".log-error").textContent(),
+      `Too many requests. ${advice} Request ID: ${rateLimitRequestId}`,
+    );
+    // Runtime status keeps polling, but a manual log read is audited and must not repeat.
+    await page.clock.runFor(15_000);
+    await waitForIdleFetches(page);
+    assert.deepEqual(reads.splice(0), [action]);
+    assert.equal(
+      await page.getByRole("button", { name: "Follow" }).getAttribute("aria-pressed"),
+      "false",
+    );
+  }
+});
+
+test("rate limits keep Follow and status automatic, but not a download made while following", async (t) => {
+  const page = await logsBeforeRateLimit(t);
+  const counts = { follow: 0, status: 0, download: 0 };
+  await page.route(/\/runtime(?:\/logs\?|$)/, (route) => {
+    const url = new URL(route.request().url());
+    const read = url.searchParams.has("download")
+      ? "download"
+      : url.pathname.endsWith("/logs")
+        ? "follow"
+        : "status";
+    counts[read]++;
+    return route.fulfill(rateLimitedResponse(read === "follow" ? 1 : 13));
+  });
+  const logError = page.locator(".log-error");
+  const waiting = `Too many requests. Waiting before the next read. Request ID: ${rateLimitRequestId}`;
+  await page.getByRole("button", { name: "Follow", exact: true }).click();
+  await page.clock.runFor(2_000);
+  await waitForIdleFetches(page);
+  assert.equal(await logError.textContent(), waiting);
+  // A one-second Retry-After does not shorten Follow's two-second minimum.
+  await page.clock.runFor(1_999);
+  assert.equal(counts.follow, 1);
+  await page.clock.runFor(1);
+  await waitForIdleFetches(page);
+  assert.equal(counts.follow, 2);
+
+  await page.getByRole("button", { name: "Download" }).click();
+  await waitForIdleFetches(page);
+  assert.match(await logError.textContent(), /Too many requests\. Try again in 13 seconds\./);
+
+  // Status has its own ten-second poll. Neither automatic read repeats the download.
+  await page.clock.runFor(6_000);
+  await waitForIdleFetches(page);
+  assert.equal(await page.getByRole("status").filter({ hasText: waiting }).textContent(), waiting);
+  assert.equal(counts.status, 1);
+  await page.clock.runFor(10_000);
+  await waitForIdleFetches(page);
+  assert.equal(counts.status, 2);
+  assert.equal(counts.download, 1);
+});
+
+// A rate-limited Refresh logs emptied the pane before its read, so only the error remained, and
+// "Try again in 1 second" stayed long after that second had passed (finding 1715).
+test("a rate-limited Refresh logs keeps the loaded lines and says when to try again", async (t) => {
+  const page = await logsBeforeRateLimit(t);
+  const log = page.getByRole("log", { name: "Runtime log output" });
+  const logError = page.locator(".log-error");
+  const outputStatus = page.locator(".log-output-status");
+  const shownStatus = await outputStatus.textContent();
+  assert.match(shownStatus, /^Showing /u);
+  let answer = rateLimitedResponse(7);
+  await page.route("**/runtime/logs?*", (route) =>
+    answer ? route.fulfill(answer) : route.fallback(),
+  );
+
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  await waitForIdleFetches(page);
+  assert.equal(
+    await logError.textContent(),
+    `Too many requests. Try again in 7 seconds. Request ID: ${rateLimitRequestId}`,
+  );
+  assert.equal(await log.locator(".log-row").count(), 1);
+  await log.getByText("output before the rate limit").waitFor();
+  assert.equal(await outputStatus.textContent(), shownStatus);
+  await page.clock.runFor(6_999);
+  assert.match(await logError.textContent(), /Try again in 7 seconds\./u);
+  await page.clock.runFor(1);
+  assert.equal(
+    await logError.textContent(),
+    `Too many requests. You can try again now. Request ID: ${rateLimitRequestId}`,
+  );
+
+  // The next refresh replaces the kept lines with its own page.
+  answer = null;
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  await waitForIdleFetches(page);
+  assert.equal(await logError.isHidden(), true);
+  assert.equal(await log.locator(".log-row").count(), 1);
+  await log.getByText("output before the rate limit").waitFor();
+
+  // A second Refresh while one reads queues another. When that one is rate limited, the status
+  // still names the lines shown, not "Reading output…".
+  let release;
+  const held = new Promise((resolve) => {
+    release = resolve;
+  });
+  let doubleReads = 0;
+  const doubleRefresh = async (route) => {
+    doubleReads += 1;
+    if (doubleReads === 1) {
+      await held;
+      return route.fallback();
+    }
+    return route.fulfill(rateLimitedResponse(2));
+  };
+  await page.route("**/runtime/logs?*", doubleRefresh);
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  await waitForCondition(() => doubleReads === 1, "the first refresh is held");
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  release();
+  await waitForCondition(() => doubleReads === 2, "the queued refresh reads");
+  await waitForIdleFetches(page);
+  assert.match(await logError.textContent(), /Try again in 2 seconds\./u);
+  assert.equal(await outputStatus.textContent(), shownStatus);
+  assert.equal(await log.locator(".log-row").count(), 1);
+  await page.unroute("**/runtime/logs?*", doubleRefresh);
+
+  // Following lines whose cursor was rejected cannot be read on from, so the new view clears them
+  // first, even when it is rate limited: the next read would repeat them.
+  let followReads = 0;
+  const rejectCursor = (route) => {
+    followReads += 1;
+    return route.fulfill(
+      followReads === 1
+        ? {
+            status: 400,
+            contentType: "application/json",
+            body: JSON.stringify({
+              error: { code: "RUNTIME_LOGS_CURSOR_INVALID", message: "Start a new view." },
+              meta: { requestId: rateLimitRequestId },
+            }),
+          }
+        : rateLimitedResponse(5),
+    );
+  };
+  await page.route("**/runtime/logs?*", rejectCursor);
+  await page.getByRole("button", { name: "Follow", exact: true }).click();
+  await page.clock.runFor(2_000);
+  await waitForCondition(() => followReads === 2, "the rejected cursor starts a new view");
+  await waitForIdleFetches(page);
+  assert.equal(await log.locator(".log-row").count(), 0);
+  await page.getByRole("button", { name: "Following", exact: true }).click();
+  await page.unroute("**/runtime/logs?*", rejectCursor);
+
+  // A read for another selection still clears the lines first: they belong to the old one.
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  await waitForIdleFetches(page);
+  await log.getByText("output before the rate limit").waitFor();
+  answer = rateLimitedResponse(3);
+  await page.getByLabel("Include debug").check();
+  await waitForIdleFetches(page);
+  assert.match(await logError.textContent(), /Try again in 3 seconds\./u);
+  assert.equal(await log.locator(".log-row").count(), 0);
+  assert.equal(await outputStatus.textContent(), "");
+});
+
+// A refresh keeps its lines until its page arrives, but only for the selection they belong to:
+// another source picked while that refresh is still reading clears them at once, before any read
+// for it lands (owner review of #2792).
+test("a source picked while a refresh reads clears the kept lines at once", async (t) => {
+  const logs = await logsFixture(t);
+  logs.computeDriver.state.lines = [line(1, "gateway output")];
+  logs.computeDriver.state.harnessPod = { ready: true };
+  logs.computeDriver.state.harnessLines = [line(1, "agent output")];
+  const { page } = await openRetainedLogs(t, logs);
+  const log = page.getByRole("log", { name: "Runtime log output" });
+  const outputStatus = page.locator(".log-output-status");
+  await log.getByText("gateway output").waitFor();
+  await page.locator("#runtime-log-source").selectOption("agent");
+  await log.getByText("agent output").waitFor();
+  await waitForIdleFetches(page);
+
+  const refresh = await holdRequests(t, page, "**/runtime/logs?*", { once: true });
+  await page.getByRole("button", { name: "Refresh logs" }).click();
+  try {
+    await refresh.requested;
+    // A refresh of the same source keeps the Agent line while it reads.
+    assert.equal(await log.getByText("agent output").count(), 1);
+    await page.locator("#runtime-log-source").selectOption("gateway");
+    // Checked while the refresh is still held: the Agent line is gone under the Gateway picker.
+    assert.equal(await log.locator(".log-row").count(), 0);
+    assert.equal(await outputStatus.textContent(), "Reading output…");
+  } finally {
+    refresh.release();
+  }
+  await log.getByText("gateway output").waitFor();
+  await waitForIdleFetches(page);
+  assert.equal(await log.getByText("agent output").count(), 0);
+  assert.match(await outputStatus.textContent(), /^Showing gateway in /u);
+});
+
 test("the Sandbox source shows redacted policy decisions without a Pod picker", async (t) => {
   const computeDriver = createRuntimeLogComputeDriver({ sandboxNamespace: "tenant-console" });
   const secret = `Zq9${randomUUID().replaceAll("-", "")}`;
@@ -923,7 +1583,8 @@ test("the Sandbox source shows redacted policy decisions without a Pod picker", 
       return {
         sandbox: `sb-${context.revision.id.slice(4, 12)}`,
         observedAt: "2026-09-30T12:00:05.000Z",
-        lines: sandboxState.lines,
+        // Native OCSF decoding belongs to the Driver; OCC sanitizes the shared records.
+        lines: sandboxState.lines.map(openShellLogDecision),
         bufferTotal: sandboxState.lines.length,
       };
     },
@@ -1121,8 +1782,8 @@ test("a reader without operate learns what log text needs and is asked for statu
   assert.equal(statusReads(), 1);
 
   // Every denied read is an audited authorization denial: reopening the tab does not ask again.
-  await page.getByRole("button", { name: "Configuration", exact: true }).click();
-  await page.getByRole("button", { name: "Logs", exact: true }).click();
+  await page.getByRole("tab", { name: "Configuration", exact: true }).click();
+  await page.getByRole("tab", { name: "Logs", exact: true }).click();
   // The reopened tab shows this text only after its status decision, so a repeat read has started.
   await page.getByText(/Log text needs Agent read_logs/).waitFor();
   await settlePageRequests(page);
@@ -1151,11 +1812,11 @@ test("a status denial for one operator does not carry over to the next sign-in o
   await page.getByText(/Runtime status requires Agent operate/).waitFor();
 
   // Sign out and in as the administrator without reloading the page.
-  await page.getByRole("button", { name: "OpenClaw Enterprise", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Logout" }).click();
-  await page.getByLabel("Username").fill(fixture.credentials.email);
+  await page.locator(".account-toggle").click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByLabel("Email", { exact: true }).fill(fixture.credentials.email);
   await page.getByLabel("Password").fill(fixture.credentials.password);
-  await page.getByRole("button", { name: "Login", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL(/\/console\/agents/);
   const statusReads = () =>
     requests.filter(({ path }) => path.endsWith(`/deployments/${revisionId}/runtime`)).length;
@@ -1682,7 +2343,7 @@ for (const delayed of ["follow", "download"]) {
     logs.computeDriver.state.lines.push(line(2, "authorized before revocation"));
 
     const follow = page.getByRole("button", { name: "Follow", exact: true });
-    const download = page.getByRole("button", { name: "Download" });
+    const download = page.getByRole("button", { name: "Download", exact: true });
     const startFollow = async () => {
       await follow.click();
       await page.clock.runFor(2_000);
@@ -1800,6 +2461,141 @@ test("Back rebuilds a Logs view whose status read alone is refused since", async
   await waitForIdleFetches(page);
   assert.equal(refusals, 1);
 });
+
+// One revoke of a role holding both read_logs and operate cleared the refused output at once, but
+// left the Pod cards under the log refusal until the next status poll refused, 1.4-3.8 s later
+// (finding 1597). The log refusal now asks for status once at once, on no new timer; a first
+// log read refused (log text never allowed) asks nothing more.
+test("a follow poll refused with operate revoked too clears the Pod cards at once", async (t) => {
+  const logs = await logsFixture(t);
+  logs.computeDriver.state.lines = [line(1, "read before the revoke")];
+  const { account, role } = await logsMember(logs.fixture, logs.namespace, "one-revoke", [
+    "read",
+    "operate",
+    "read_logs",
+  ]);
+  const { page, requests } = await openRetainedLogs(t, logs, account.credentials);
+  const pane = page.getByRole("log", { name: "Runtime log output" });
+  await pane.getByText("read before the revoke").waitFor();
+  const pods = page.locator(".runtime-pod");
+  await pods.first().waitFor();
+  await page.getByRole("button", { name: "Follow" }).click();
+  const statusReads = () =>
+    requests.filter(({ path }) => path.endsWith(`/deployments/${logs.revisionId}/runtime`)).length;
+  const before = statusReads();
+
+  changeGrant(role, "read_logs", false);
+  changeGrant(role, "operate", false);
+  const statusRefused = page.waitForResponse(
+    (response) => response.url().endsWith("/runtime") && response.status() === 403,
+  );
+  // Only the follow poll's timer runs, well short of the 10 s status poll.
+  await page.clock.runFor(2_000);
+  await page.getByText(/Log text requires Agent read_logs/).waitFor();
+  await statusRefused;
+  await page.getByText(/Runtime status requires Agent operate/).waitFor();
+  await waitForIdleFetches(page);
+  assert.equal(await pods.count(), 0, "the Pod cards clear with the log refusal");
+  assert.equal(await pane.locator(":scope > *").count(), 0);
+  assert.equal(statusReads(), before + 1);
+  // The refusal is remembered: no status poll follows.
+  await page.clock.runFor(20_000);
+  await waitForIdleFetches(page);
+  assert.equal(statusReads(), before + 1);
+});
+
+// A status read authorized before the revoke can answer after the log refusal. The refusal's
+// own status read supersedes it, so its stale answer neither brings the Pod cards back after a
+// refused status nor overrides a fresh one (finding 1597).
+for (const { name, revoked, podsKept, staleFails = false } of [
+  { name: "operate revoked too", revoked: ["read_logs", "operate"], podsKept: false },
+  { name: "only read_logs revoked", revoked: ["read_logs"], podsKept: true },
+  // A superseded failure is ignored too: no error over the fresh answer's Pod cards.
+  {
+    name: "only read_logs revoked, the stale read failing",
+    revoked: ["read_logs"],
+    podsKept: true,
+    staleFails: true,
+  },
+]) {
+  test(`a status read in flight at a log refusal yields to a fresh one: ${name}`, async (t) => {
+    const logs = await logsFixture(t);
+    logs.computeDriver.state.lines = [line(1, "read before the revoke")];
+    const { account, role } = await logsMember(logs.fixture, logs.namespace, "stale-status", [
+      "read",
+      "operate",
+      "read_logs",
+    ]);
+    const { page, requests } = await openRetainedLogs(t, logs, account.credentials);
+    const pane = page.getByRole("log", { name: "Runtime log output" });
+    await pane.getByText("read before the revoke").waitFor();
+    const pods = page.locator(".runtime-pod");
+    await pods.first().waitFor();
+    await page.getByRole("button", { name: "Follow" }).click();
+    const statusPath = `/deployments/${logs.revisionId}/runtime`;
+    const statusReads = () => requests.filter(({ path }) => path.endsWith(statusPath)).length;
+    // The next status poll is answered with the grants it was authorized under (or, in the
+    // failing case, refused without reaching the server), then held.
+    const stale = await holdRequests(t, page, `**${statusPath}`, {
+      once: true,
+      ...(staleFails
+        ? {
+            fulfill: {
+              status: 504,
+              contentType: "application/json",
+              body: JSON.stringify({
+                error: {
+                  code: "RUNTIME_LOGS_TIMEOUT",
+                  message: "The runtime status or log read timed out.",
+                },
+                meta: { requestId: "req_test_stale_status" },
+              }),
+            },
+          }
+        : { afterServer: true }),
+    });
+    await page.clock.runFor(10_000);
+    await stale.requested;
+    // The follow poll due at the same time settles first, so the next one is on the clock.
+    await page.waitForFunction(() => globalThis.inFlightFetchCount() === 1);
+    const before = statusReads();
+
+    for (const permission of revoked) {
+      changeGrant(role, permission, false);
+    }
+    const fresh = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(statusPath) && response.status() === (podsKept ? 200 : 403),
+    );
+    await page.clock.runFor(2_000);
+    await page.getByText(/Log text requires Agent read_logs/).waitFor();
+    await fresh;
+    const arriving = page.waitForResponse(
+      (response) =>
+        response.url().endsWith(statusPath) && response.status() === (staleFails ? 504 : 200),
+    );
+    stale.release();
+    await arriving;
+    await waitForIdleFetches(page);
+    assert.equal(await pane.locator(":scope > *").count(), 0);
+    assert.equal(statusReads(), before + 1);
+    if (podsKept) {
+      assert.ok((await pods.count()) > 0, "a fresh status answer keeps the Pod cards");
+      assert.equal(await page.getByText(/Runtime status requires Agent operate/).count(), 0);
+      assert.equal(await page.getByText("The read timed out. Try again.").count(), 0);
+    } else {
+      assert.equal(await pods.count(), 0, "the stale answer does not bring the Pod cards back");
+      await page.getByText(/Runtime status requires Agent operate/).waitFor();
+    }
+    // The fresh read alone schedules the next poll, one interval on; a refused status stops.
+    await page.clock.runFor(9_000);
+    await waitForIdleFetches(page);
+    assert.equal(statusReads(), before + 1);
+    await page.clock.runFor(1_000);
+    await waitForIdleFetches(page);
+    assert.equal(statusReads(), before + (podsKept ? 2 : 1));
+  });
+}
 
 // Losing operate hides the last status, not log text the member still has permission to read.
 test("a refused status poll clears the Pod details and keeps authorized log reads", async (t) => {
@@ -1931,11 +2727,11 @@ test("a restored operate grant shows status on Back, and a new sign-in asks for 
 
   // Sign out and in again as the same member, without reloading the tab.
   changeGrant(role, "read_logs", true);
-  await page.getByRole("button", { name: "OpenClaw Enterprise", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Logout" }).click();
-  await page.getByLabel("Username").fill(account.credentials.email);
+  await page.locator(".account-toggle").click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByLabel("Email", { exact: true }).fill(account.credentials.email);
   await page.getByLabel("Password").fill(account.credentials.password);
-  await page.getByRole("button", { name: "Login", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL(/\/console\/agents/);
   const url = detailUrl(logs.fixture, logs.namespace.id, logs.agent.id, logs.revisionId, "logs");
   await page.evaluate((target) => {
@@ -1963,8 +2759,8 @@ test("a Logs tab rebuilt after an operate grant reads status again without a pag
   const permissionReads = () =>
     requests.filter(({ path }) => path.endsWith(`/agents/${logs.agent.id}/permissions`)).length;
   const reopenLogs = async () => {
-    await page.getByRole("button", { name: "Configuration", exact: true }).click();
-    await page.getByRole("button", { name: "Logs", exact: true }).click();
+    await page.getByRole("tab", { name: "Configuration", exact: true }).click();
+    await page.getByRole("tab", { name: "Logs", exact: true }).click();
   };
   assert.equal(statusReads(), 1);
 
@@ -1996,8 +2792,8 @@ test("a status refusal after a revocation the page did not read is asked again o
   await page.locator(".runtime-pod").first().waitFor();
   await waitForIdleFetches(page);
   const reopenLogs = async () => {
-    await page.getByRole("button", { name: "Configuration", exact: true }).click();
-    await page.getByRole("button", { name: "Logs", exact: true }).click();
+    await page.getByRole("tab", { name: "Configuration", exact: true }).click();
+    await page.getByRole("tab", { name: "Logs", exact: true }).click();
   };
 
   changeGrant(role, "operate", false);
@@ -2027,8 +2823,8 @@ test("a status refusal taken while operate is allowed is asked again after a new
   const permissionReads = () =>
     requests.filter(({ path }) => path.endsWith(`/agents/${logs.agent.id}/permissions`)).length;
   const reopenLogs = async () => {
-    await page.getByRole("button", { name: "Configuration", exact: true }).click();
-    await page.getByRole("button", { name: "Logs", exact: true }).click();
+    await page.getByRole("tab", { name: "Configuration", exact: true }).click();
+    await page.getByRole("tab", { name: "Logs", exact: true }).click();
     await page.getByText(/Runtime status requires Agent operate/).waitFor();
     await waitForIdleFetches(page);
   };
@@ -2043,11 +2839,11 @@ test("a status refusal taken while operate is allowed is asked again after a new
   assert.equal(permissionReads(), permissionsBefore + 1);
 
   await page.unroute(`${logs.fixture.origin}${statusPath}`);
-  await page.getByRole("button", { name: "OpenClaw Enterprise", exact: true }).click();
-  await page.getByRole("menuitem", { name: "Logout" }).click();
-  await page.getByLabel("Username").fill(account.credentials.email);
+  await page.locator(".account-toggle").click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.getByLabel("Email", { exact: true }).fill(account.credentials.email);
   await page.getByLabel("Password").fill(account.credentials.password);
-  await page.getByRole("button", { name: "Login", exact: true }).click();
+  await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.waitForURL(/\/console\/agents/);
   const url = detailUrl(logs.fixture, logs.namespace.id, logs.agent.id, logs.revisionId, "logs");
   await page.evaluate((target) => {

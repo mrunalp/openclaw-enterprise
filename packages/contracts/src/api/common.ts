@@ -242,7 +242,7 @@ export const AgentRevisionListQuery = Type.Object(
     limit: Type.Optional(
       Type.String({
         pattern: "^(?:[1-9][0-9]?|100)$",
-        description: "Revisions per page, 1 to 100; default 50.",
+        description: "Agent revisions per page, 1 to 100; default 50.",
       }),
     ),
     cursor: Type.Optional(
@@ -545,6 +545,7 @@ export const PermissionActionSchema = Type.Union([
   Type.Literal("operate"),
   Type.Literal("administer"),
   Type.Literal("read_logs"),
+  Type.Literal("manage_policy"),
 ]);
 
 export const ResourceKindSchema = Type.Union([
@@ -557,6 +558,7 @@ export const ResourceKindSchema = Type.Union([
   Type.Literal("agent"),
   Type.Literal("agent_revision"),
   Type.Literal("credential_source"),
+  Type.Literal("sandbox_policy"),
 ]);
 
 export const NamespacePolicyResourceKindSchema = Type.Union([
@@ -565,6 +567,7 @@ export const NamespacePolicyResourceKindSchema = Type.Union([
   Type.Literal("agent_revision"),
   Type.Literal("configuration"),
   Type.Literal("credential_source"),
+  Type.Literal("sandbox_policy"),
   Type.Literal("preset"),
   Type.Literal("secret"),
   Type.Literal("service_account"),
@@ -747,7 +750,7 @@ export const ProvisionAgentBody = Type.Object(
     harnessAuth: Type.Optional(
       Type.Union([HarnessAuthBindingSchema, Type.Null()], {
         description:
-          "Dedicated Harness authentication, required. Omitted, null, `runtime` and `credential_source` are refused with 400 INVALID_REQUEST; for a credential source, create the Agent with the source, then deploy it.",
+          "Dedicated Harness authentication, required. Omitted, null and `runtime` are refused with 400 INVALID_REQUEST. A ready model `credential_source` is supported when the selected Credential Gateway owns it and the caller has source `operate` permission.",
       }),
     ),
     executionMode: Type.Optional(HarnessExecutionModeSchema),
@@ -755,6 +758,23 @@ export const ProvisionAgentBody = Type.Object(
     pluginApprovers: Type.Optional(Type.Ref("PluginApprovers")),
     repositoryBindings: Type.Optional(RepositoryBindingRequestsSchema),
     repositoryAccess: Type.Optional(RepositoryAccessSchema),
+  },
+  { additionalProperties: false },
+);
+
+export const ValidateAgentCreateBody = Type.Object(
+  {
+    initialWorkspaceFiles: Type.Optional(CreateAgentBody.properties.initialWorkspaceFiles),
+    configuration: Type.Object(
+      { kind: ConfigurationKindSchema, values: ConfigurationValues },
+      {
+        additionalProperties: false,
+        description: "The Agent Configuration the caller will save, not yet saved.",
+      },
+    ),
+    executionMode: Type.Optional(HarnessExecutionModeSchema),
+    plugins: Type.Optional(Type.Ref("PluginDesiredState")),
+    pluginApprovers: Type.Optional(Type.Ref("PluginApprovers")),
   },
   { additionalProperties: false },
 );

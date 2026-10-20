@@ -15,7 +15,7 @@ principal receives `operate` on the source only, not on the Secret.
 
 The default Codex scenario uses the production Driver path. Compute sends only
 `APP_TOKEN_SHA`; OpenShell supplies `runtime.json`, `config.toml`, and the
-one-shot node setup credential through a revision-owned provider. The test
+one-shot node setup credential through a provider for that Agent revision. The test
 checks that the raw app-server token and model key are absent from Pod specs and
 nonsecret provider data. It then verifies missing, incorrect, and correct bearer
 requests through the exposed route. Two HTTP chat turns through the Agent Gateway
@@ -24,6 +24,36 @@ native Codex session records. Direct app-server probes then check filesystem,
 network, and credential enforcement. Exact workload identity, approved mounts
 and privileges, source withdrawal, replacement, and cleanup remain required.
 Missing prerequisites fail rather than skip.
+
+## Agent network policy
+
+The policy scenario uses the production HTTP admission path, PostgreSQL worker,
+and real OpenShell policy RPCs. It exercises a Python denial, an explicitly
+applied grant, removal, and isolation from a second Agent. Denial logs and native
+recommendations are checked separately.
+
+It revokes each required permission after work is queued and checks failure
+before `UpdateConfig`, unchanged loaded provider state, and attributable audit
+evidence. A test barrier also interrupts the worker after the real native write
+succeeds but before OCC records its receipt. A restarted worker must confirm
+the loaded policy without issuing the write again. These cases require the
+real runtime; local wire fixtures do not establish their outcomes.
+
+The scope check temporarily enables OIDC on the real Namespace gateway using
+the disposable HTTPS Keycloak issuer. Signed identities with `sandbox:read`,
+`config:read`, `config:write`, or no scope exercise policy status, recommendations,
+and `UpdateConfig`. Missing authentication and insufficient scopes must fail;
+rejected writes must preserve provider state. An authorized writer resubmits
+the loaded policy, which OpenShell may deduplicate. This checks RPC scopes in
+authentication-only role mode; it does not qualify Workspace role isolation.
+It runs last because changing gateway authentication restarts the service router;
+continuity of existing service routes across that configuration change is unqualified.
+
+CI preparation supplies `OCC_TEST_OPENSHELL_POLICY_MIGRATION_DATABASE_URL` for
+the same disposable database as `OCC_TEST_DATABASE_URL`. Direct file runs must
+set it to that database's `occ_migrator` URL. Only fixture setup uses it to
+insert and remove IAM Restrictions; the API, worker, and observer retain the
+application role.
 
 ## Credential route
 
@@ -57,17 +87,19 @@ Next, the Codex scenario takes each dependency away and restores it before
 asserting:
 
 - **Tool upstream.** The echo Service selects no Pod. OpenShell must end the
-  request without a response (curl exit 52), and the upstream must receive the
-  source's own token again once the Service is restored.
+  request without a response (curl exit 52), or hold it until curl's bounded
+  timeout (exit 28). The upstream must receive the source's own token again once
+  the Service is restored.
 - **Model provider.** For a DNS endpoint, cluster DNS sends the model host to a
   Service with no endpoints. The turn must fail without exposing the model
-  credential, and the same revision must serve the next turn once DNS is
+  credential, and the same version must serve the next turn once DNS is
   restored. An IP endpoint reports this check as not run.
 - **OpenShell gateway.** The Namespace's gateway StatefulSet is scaled to zero.
   While it is down, the running Agent cannot serve a turn, a source read
   reports `failed`, registration returns `503 DEPENDENCY_UNAVAILABLE`, and a
-  redeploy fails at least one attempt and stays queued. Once the gateway is
-  back, the redeploy activates and serves a turn without operator action.
+  redeploy waits as `SANDBOX_GATEWAY_UNAVAILABLE` without spending attempts
+  and stays queued. Once the gateway is back, the redeploy activates and serves
+  a turn without operator action.
 
 After the restart, an OAuth2 source whose refresh was due may fail with
 `refresh_configuration_invalid` and be retried only an hour later
@@ -82,7 +114,7 @@ attaches one of the tool sources. When the first Agent withdraws that source,
 the second Agent still receives its token. The scenario then checks that:
 
 - no Pod of the Agent mounts or references the stored source Secret;
-- the Pod specs, the Agent- and revision-owned Secrets, and the workspace PVC
+- the Pod specs, the Secrets for the Agent and its Agent revisions, and the workspace PVC
   files hold no upstream credential. Files are matched outside the Pod, so no
   credential-derived value enters it;
 - deployment diagnostics, runtime status and logs, and the Namespace's audit
@@ -93,6 +125,6 @@ the second Agent still receives its token. The scenario then checks that:
 The Codex scenario then updates the source through the API, withdraws it from
 the running Agent, waits for `revoked`, and expects the next model turn in the
 same process to fail. It accepts any turn failure, so it does not yet tell a
-credential rejection from a transport error or a restarted process. Full
-manual integration lanes run from `main`; trusted pull requests also run the
-OpenShell advisory job described in [Tests in each workflow](ci.md#tests-in-each-workflow).
+credential rejection from a transport error or a restarted process. The
+[complete OpenShell advisory lane](ci.md#qa-matrix) runs on every push to `main` and on
+trusted pull requests when a maintainer requests it with the `full-qa` label.
