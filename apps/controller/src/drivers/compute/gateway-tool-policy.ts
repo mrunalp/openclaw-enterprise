@@ -1,4 +1,8 @@
-import type { OpenClawConfigurationDocument } from "@openclaw-enterprise/contracts";
+import type {
+  ConfigurationValidationOptions,
+  OpenClawConfigurationDocument,
+  OpenClawConfigurationValue,
+} from "@openclaw-enterprise/contracts";
 
 // Concrete reviewed tools/actions. Plugin selection and ordinary tool grants do
 // not extend this list. Keep native Codex capability policy separate.
@@ -109,6 +113,27 @@ const GATEWAY_TOOL_BASELINE = {
   },
 };
 
+// Tools outside the baseline that the pinned OpenClaw core (src/agents/tools)
+// declares with a top-level action field. OpenClaw refuses to assemble any
+// allowed tool like this without tools.gatewayPolicy.actions.<tool>, so every
+// model turn would fail; Agent save refuses it first. Plugin tools are not
+// listed: OCE cannot read their schemas before deployment.
+const GATEWAY_ACTION_TOOLS = [
+  "computer",
+  "dashboard",
+  "github_publish",
+  "image_generate",
+  "mobile_ui",
+  "music_generate",
+  "personal_instructions",
+  "portal",
+  "screen",
+  "skill_workshop",
+  "theme",
+  "transcripts",
+  "video_generate",
+];
+
 // Codex's native tools operate in the Harness. Their Gateway equivalents
 // would instead access the control-plane container.
 const GATEWAY_LOCAL_CODEX_DYNAMIC_TOOLS = [
@@ -130,7 +155,7 @@ const GATEWAY_LOCAL_CODEX_DYNAMIC_TOOLS = [
 
 // Reviewed core, automation and Codex adapter enforcement. Update together
 // with the runtime source pin and archive provenance.
-export const GATEWAY_TOOL_POLICY_SOURCE_COMMIT = "cee236c9e9891396a7d672ab016a5e5d9d51a003";
+export const GATEWAY_TOOL_POLICY_SOURCE_COMMIT = "97a1b4c07336db0c2f0eb52901118983490b7b1e";
 
 type SettingError = (setting: string, requirement: string) => Error;
 
@@ -250,6 +275,9 @@ export function managedGatewayConfiguration(
     } else if (prior !== undefined) {
       actions[tool] = prior;
     }
+    if (actions[tool] === undefined && GATEWAY_ACTION_TOOLS.includes(tool)) {
+      throw createError(`tools.gatewayPolicy.actions.${tool}`, "must list the permitted actions");
+    }
   }
   const next: Record<string, OpenClawConfigurationDocument[string]> =
     structuredClone(configuration);
@@ -297,11 +325,56 @@ export function managedGatewayConfiguration(
   return next;
 }
 
+/**
+ * The tool policy rules that hold for every OpenClaw topology: the pinned OpenClaw applies
+ * tools.gatewayPolicy natively in an embedded Gateway too, so a policy it cannot assemble fails
+ * every turn there (finding 2688). Configuration save and Agent admission run it with the
+ * messages dedicated composition uses (finding 2689). A Configuration without a policy passes:
+ * only dedicated composition adds the baseline. A Preset policy with an unfilled variable
+ * anywhere, in a value or an object key, is skipped whole at Preset save and checked when a
+ * Configuration is created from it.
+ */
+export function validateGatewayToolPolicy(
+  configuration: Readonly<OpenClawConfigurationDocument>,
+  createError?: SettingError,
+  options?: ConfigurationValidationOptions,
+): void {
+  const tools = configuration.tools;
+  if (
+    tools === null ||
+    typeof tools !== "object" ||
+    Array.isArray(tools) ||
+    !Object.hasOwn(tools, "gatewayPolicy")
+  ) {
+    return;
+  }
+  const { gatewayPolicy } = tools as { readonly gatewayPolicy: OpenClawConfigurationValue };
+  const unresolved = options?.unresolved;
+  const waits = (value: OpenClawConfigurationValue, path: (string | number)[]): boolean =>
+    unresolved !== undefined &&
+    (typeof value === "string"
+      ? unresolved(path) !== undefined
+      : Array.isArray(value)
+        ? value.some((item: OpenClawConfigurationValue, index) => waits(item, [...path, index]))
+        : value !== null &&
+          typeof value === "object" &&
+          Object.entries(value).some(
+            ([key, item]) =>
+              unresolved([...path, key], true) !== undefined || waits(item, [...path, key]),
+          ));
+  if (waits(gatewayPolicy, ["tools", "gatewayPolicy"])) {
+    return;
+  }
+  // The policy alone, so the composition's other settings stay with dedicated deployment.
+  managedGatewayConfiguration({ tools: { gatewayPolicy } }, undefined, false, createError);
+}
+
 // Both Compute launchers compose and validate before any native Gateway starts.
 // The expected source identifies the reviewed core + automation + Codex adapter
 // stack; accepting this schema alone would not establish adapter enforcement.
 export const GATEWAY_TOOL_POLICY_RUNTIME = String.raw`
 const GATEWAY_TOOL_BASELINE = ${JSON.stringify(GATEWAY_TOOL_BASELINE)};
+const GATEWAY_ACTION_TOOLS = ${JSON.stringify(GATEWAY_ACTION_TOOLS)};
 const GATEWAY_LOCAL_CODEX_DYNAMIC_TOOLS = ${JSON.stringify(GATEWAY_LOCAL_CODEX_DYNAMIC_TOOLS)};
 const managedGatewayConfiguration = ${managedGatewayConfiguration.toString()};
 class GatewayToolPolicyError extends Error {

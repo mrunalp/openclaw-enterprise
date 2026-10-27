@@ -19,6 +19,7 @@ export {
   preparedGitHubLive,
   readPreparedGitHubMetadata,
 } from "./state/prepared-github-state.ts";
+export type { PreparedGitHubMetadataAdmission } from "./state/prepared-github-state.ts";
 import {
   assertExecutionAdmission,
   assertExecutionReleaseAllowed,
@@ -322,7 +323,11 @@ import {
   SecretStorageDriverError,
   SecretValueError,
 } from "./errors.ts";
-import { validateConfigurationSettings } from "./configuration-settings.ts";
+import {
+  refuseRetiredOpenClawSettings,
+  validateConfigurationSettings,
+  validateWorkspaceBootstrapSettings,
+} from "./configuration-settings.ts";
 import { enabledChannelEntries, requireChannelSecretBindings } from "./channel-secret-bindings.ts";
 import { validateModelProviderSettings } from "./model-provider-settings.ts";
 import {
@@ -1494,6 +1499,9 @@ const HARNESS_DISPLAY_NAMES: Readonly<Record<string, string>> = Object.freeze({
 function validExecutionMode(value: unknown): value is HarnessExecutionMode {
   return value === "embedded" || value === "dedicated";
 }
+
+const GATEWAY_MANAGED_MODE_UNSUPPORTED =
+  "Agent setting gatewayManagedMode is not supported by the selected Compute Driver.";
 
 function normalizeGatewayManagedMode(value: unknown, defaultValue?: boolean): boolean {
   const mode = value === undefined ? defaultValue : value;
@@ -5664,13 +5672,10 @@ export class OpenClawController {
     }
     // A provisioned revision may probe before activation. It must still be the newest
     // admitted running revision; an older or superseded execution cannot keep using egress.
-    const revisions = await state.revisions.listRevisionMetadata(
-      execution.namespaceId,
-      execution.agentId,
-    );
     if (
-      revisions.at(-1)?.id !== execution.revisionId &&
-      agent.activeRevisionId !== execution.revisionId
+      agent.activeRevisionId !== execution.revisionId &&
+      (await state.revisions.listRevisionMetadata(execution.namespaceId, execution.agentId)).at(-1)
+        ?.id !== execution.revisionId
     ) {
       return deny("withdrawn");
     }
@@ -9163,7 +9168,10 @@ export class OpenClawController {
     if (!validExecutionMode(executionMode)) {
       throw new ScopeViolationError("The Agent Harness execution mode is invalid.");
     }
-    const gatewayManagedMode = normalizeGatewayManagedMode(input.gatewayManagedMode, true);
+    const gatewayManagedMode = normalizeGatewayManagedMode(
+      input.gatewayManagedMode,
+      this.gatewayManagedModeSupported(),
+    );
     const backendId = this.backendId(input.backendId);
     const plugins = normalizeAgentPlugins(input.plugins);
     const pluginApprovers = normalizeAgentPluginApprovers(input.pluginApprovers);
@@ -9175,7 +9183,8 @@ export class OpenClawController {
         namespaceId: input.namespaceId,
       };
       await this.authorize(principalId, "create", target);
-      await this.authorizeGatewayManagedModeChange(principalId, gatewayManagedMode === false);
+      await this.authorizeGatewayManagedModeChange(principalId, input.gatewayManagedMode === false);
+      this.requireGatewayManagedModeSupport(gatewayManagedMode);
       const namespace = await this.lockNamespace(state, input.namespaceId);
       // Checked after authorization: the conflict names the Namespace state.
       if (namespace.status !== "provisioning" && namespace.status !== "ready") {
@@ -9310,6 +9319,9 @@ export class OpenClawController {
     await this.authorizeGatewayManagedModeChange(
       principalId,
       normalizeGatewayManagedMode(input.gatewayManagedMode, true) === false,
+    );
+    this.requireGatewayManagedModeSupport(
+      normalizeGatewayManagedMode(input.gatewayManagedMode, this.gatewayManagedModeSupported()),
     );
     await this.read(async (state) => {
       const namespace = await this.exactNamespace(state, input.namespaceId);
@@ -9556,6 +9568,7 @@ export class OpenClawController {
           principalId,
           gatewayManagedMode !== agent.gatewayManagedMode,
         );
+        this.requireGatewayManagedModeSupport(gatewayManagedMode);
       }
       await this.authorize(principalId, "read", {
         kind: "configuration",
@@ -9634,7 +9647,7 @@ export class OpenClawController {
       // refuses that pair.
       const workspaceSetup = await state.workspaceSetups.find(namespace.id, agent.id);
       const topologyChanged =
-        input.configurationId !== agent.configurationId ||
+        configurationId !== agent.configurationId ||
         (input.executionMode !== undefined && input.executionMode !== agent.executionMode);
       await this.validateSavedAgentTopology(
         state,
@@ -10011,6 +10024,11 @@ export class OpenClawController {
       // baseUrl or api the runtime cannot use would otherwise fail later, as an unexplained
       // model probe failure (finding 1549).
       validateModelProviderSettings(configuration.values);
+      // Native workspace setup refuses an invalid bootstrap setting only after the deployment
+      // starts (finding 2699).
+      validateWorkspaceBootstrapSettings(configuration.values);
+      // The Gateway refuses a setting the pinned OpenClaw retired and does not start (finding 2709).
+      refuseRetiredOpenClawSettings(configuration.values);
       this.validateComputeConfiguration(configuration.values);
       await configurationDriver.validate({ ...configuration, values: admittedConfiguration });
       if (resolveConfiguredHarnessId(admittedConfiguration) !== configuredHarnessId) {
@@ -10287,9 +10305,7 @@ export class OpenClawController {
         revisionDraft.gatewayManagedMode === true &&
         compute.supportsGatewayManagedMode !== true
       ) {
-        throw new ConfigurationHarnessError(
-          "Agent setting gatewayManagedMode is not supported by the selected Compute Driver.",
-        );
+        throw new ConfigurationHarnessError(GATEWAY_MANAGED_MODE_UNSUPPORTED);
       }
       const computeAdmission = compute.admitRevision?.(freezeAgentRevision(revisionDraft));
       const revision = await state.revisions.createRevision(
@@ -12815,14 +12831,37 @@ export class OpenClawController {
     };
   }
 
+  /**
+   * A new Agent's managed mode defaults to whether the selected Compute Driver enforces it, so
+   * an Agent on SSH Compute (or a Driver that does not declare support) is saved deployable
+   * instead of failing at its first deploy (finding 2676). The default needs no Installation
+   * administer: there is no enforcement to opt out of. Without a selected Compute it is on.
+   */
+  private gatewayManagedModeSupported(): boolean {
+    const compute = this.selections.get("compute")?.driver as ComputeDriver | undefined;
+    return compute === undefined || compute.supportsGatewayManagedMode === true;
+  }
+
+  // Agent save refuses a managed mode the selected Compute Driver cannot apply, with deploy's
+  // message, so it fails at save rather than at the next deploy (finding 2676).
+  private requireGatewayManagedModeSupport(gatewayManagedMode: boolean): void {
+    if (gatewayManagedMode && !this.gatewayManagedModeSupported()) {
+      throw new ConfigurationHarnessError(GATEWAY_MANAGED_MODE_UNSUPPORTED);
+    }
+  }
+
   private async authorizeGatewayManagedModeChange(
     principalId: string,
     required: boolean,
   ): Promise<void> {
     if (required) {
+      // The denial names gatewayManagedMode: the rest of the request needs no Installation grant
+      // (finding 2691).
       await this.authorize(principalId, "administer", {
         kind: "installation",
         id: this.installation.id,
+      }).catch((error: unknown) => {
+        throw QualifiedAuthorizationDeniedError.qualify(error, "gateway_managed_mode");
       });
     }
   }
@@ -14064,6 +14103,9 @@ export class OpenClawController {
       return;
     }
     const configuration = await readConfiguration();
+    // Deploy admission's rules for a stored Configuration that predates them (findings 2699, 2709).
+    validateWorkspaceBootstrapSettings(configuration.values);
+    refuseRetiredOpenClawSettings(configuration.values);
     let configuredHarnessId: string;
     try {
       configuredHarnessId = resolveConfiguredHarnessId(configuration.values);

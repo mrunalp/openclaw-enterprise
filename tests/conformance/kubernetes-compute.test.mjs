@@ -2384,7 +2384,7 @@ test("custom Codex endpoints qualify every non-primary model selection before dr
       pdfModel: ref("pdf"),
       utilityModel: ref("utility"),
       heartbeat: { model: ref("small") },
-      compaction: { model: ref("small"), memoryFlush: { model: ref("flush") } },
+      compaction: { model: ref("small") },
       tts: { summaryModel: ref("summary") },
       // Finding 1306: the /model allowlist, which OpenClaw honors over the models keys.
       modelPolicy: { allow: [ref("gpt-5"), ref("small"), ref("allow-only")] },
@@ -2446,10 +2446,7 @@ test("custom Codex endpoints qualify every non-primary model selection before dr
     assert.equal(defaults.pdfModel, qualified("pdf"));
     assert.equal(defaults.utilityModel, qualified("utility"));
     assert.deepEqual(defaults.heartbeat, { model: qualified("small") });
-    assert.deepEqual(defaults.compaction, {
-      model: qualified("small"),
-      memoryFlush: { model: qualified("flush") },
-    });
+    assert.deepEqual(defaults.compaction, { model: qualified("small") });
     assert.deepEqual(defaults.tts, { summaryModel: qualified("summary") });
     // An allowlist entry is qualified like a policy key, so /model back to the projected
     // primary is allowed; one with no catalog row adds none.
@@ -2479,20 +2476,12 @@ test("custom Codex endpoints qualify every non-primary model selection before dr
       [
         { id: "openai-compatible/gpt-5", name: "Primary model" },
         { id: "openai-compatible/small", name: "Small model", contextWindow: 16000 },
-        ...[
-          "image",
-          "image-fallback",
-          "pdf",
-          "utility",
-          "flush",
-          "summary",
-          "gmail",
-          "hook",
-          "channel",
-        ].map((id) => ({
-          id: `openai-compatible/${id}`,
-          name: id,
-        })),
+        ...["image", "image-fallback", "pdf", "utility", "summary", "gmail", "hook", "channel"].map(
+          (id) => ({
+            id: `openai-compatible/${id}`,
+            name: id,
+          }),
+        ),
         { id: "openai-compatible/entry-heartbeat", name: "entry-heartbeat" },
         { id: "openai-compatible/reviewer", name: "reviewer" },
       ].toSorted(byModelId),
@@ -12100,14 +12089,6 @@ test("every model selection uses the Harness binding's provider (finding 1291)",
     [{ agents: { defaults: { decisionModel: "x/m" } } }, "agents.defaults.decisionModel"],
     [{ agents: { defaults: { heartbeat: { model: "x/m" } } } }, "agents.defaults.heartbeat.model"],
     [
-      { agents: { defaults: { compaction: { memoryFlush: { model: "x/m" } } } } },
-      "agents.defaults.compaction.memoryFlush.model",
-    ],
-    [
-      { agents: { defaults: { embeddedAgent: { cyberFailover: { model: "x/m" } } } } },
-      "agents.defaults.embeddedAgent.cyberFailover.model",
-    ],
-    [
       { agents: { entries: { main: { tools: { exec: { reviewer: { model: "x/m" } } } } } } },
       "agents.entries.main.tools.exec.reviewer.model",
     ],
@@ -12670,6 +12651,7 @@ test("embedded startup probes its selected provider and allows graceful Gateway 
           },
           setInterval() {
             held = true;
+            return { unref() {} };
           },
           require(specifier) {
             if (specifier === "node:http") {
@@ -18500,10 +18482,10 @@ test("the production example sizes dedicated Gateway and Harness containers from
     assert.ok(deployment, `${prefix} Deployment rendered`);
     return deployment.spec.template.spec.containers[0];
   };
-  // A dedicated Codex Gateway held 1.2-1.6 GiB between turns and peaked at 2.2 GiB.
+  // A Gateway holds 2.3-2.4 GiB between turns and peaks at 2.8 GiB on its first turn.
   assert.deepEqual(container("gateway-").resources, {
-    requests: { cpu: "100m", memory: "1792Mi" },
-    limits: { cpu: "4", memory: "3Gi" },
+    requests: { cpu: "100m", memory: "2560Mi" },
+    limits: { cpu: "4", memory: "4Gi" },
   });
   // The Codex Harness held 0.45-0.57 GiB idle; lint, tsc and tests together were
   // OOM-killed at 2Gi and reached a 4Gi limit.
@@ -22018,7 +22000,7 @@ test("Kubernetes embedded setup uses a Main roster entry's workspace", async () 
   );
 });
 
-test("dedicated Gateway tool policy is checked at Agent admission for both Harnesses", () => {
+test("Gateway tool policy is checked at Configuration save and at Agent admission for every topology", () => {
   const driver = new KubernetesComputeDriver(options());
   const rejectedPolicies = [
     [{ allow: ["plugins"] }, /must not grant Gateway administrative tools/],
@@ -22026,56 +22008,86 @@ test("dedicated Gateway tool policy is checked at Agent admission for both Harne
     [{ allow: ["group:runtime"] }, /concrete tool/],
     [{ allow: ["message"], actions: { message: ["set-profile"] } }, /reviewed task actions/],
     [{ allow: ["sessions"] }, /actions.sessions must list/],
+    // The pinned OpenClaw fails every turn's tool assembly for an action-bearing tool
+    // allowed without actions (finding 2679), so save refuses it.
+    [{ allow: ["dashboard"] }, /actions.dashboard must list/],
     [null, /must be an object/],
   ];
-  for (const id of ["openclaw", "codex"]) {
-    const harness = { id, version: "1.0.0", mode: "dedicated" };
+  const acceptedPolicies = [
+    undefined,
+    { allow: [] },
+    { allow: ["sessions", "diffs"], actions: { sessions: ["patch"] } },
+    { allow: ["dashboard"], actions: { dashboard: ["read"] } },
+  ];
+  // The embedded Gateway applies the policy natively too, so it gets the same checks (finding
+  // 2688), and Configuration save, which knows no topology, refuses the same policies with the
+  // same text (finding 2689).
+  const topologies = [
+    ["openclaw", "dedicated"],
+    ["codex", "dedicated"],
+    ["openclaw", "embedded"],
+  ];
+  for (const [id, mode] of topologies) {
+    const harness = { id, version: "1.0.0", mode };
     const config = createHarnessConfiguration(id, "gpt-4o-mini");
+    const withPolicy = (gatewayPolicy) => ({
+      ...config,
+      tools: gatewayPolicy === undefined ? {} : { gatewayPolicy },
+    });
     for (const [gatewayPolicy, expected] of rejectedPolicies) {
+      const label = `${id} ${mode} ${JSON.stringify(gatewayPolicy)}`;
       assert.throws(
-        () =>
-          driver.validateHarnessAuth(
-            harness,
-            apiKeyAuth,
-            {
-              ...config,
-              tools: { gatewayPolicy },
-            },
-            null,
-          ),
-        expected,
+        () => driver.validateHarnessAuth(harness, apiKeyAuth, withPolicy(gatewayPolicy), null),
+        { name: "ConfigurationHarnessError", message: expected },
+        label,
+      );
+      assert.throws(
+        () => driver.validateConfiguration(withPolicy(gatewayPolicy)),
+        { name: "ConfigurationHarnessError", message: expected },
+        label,
       );
     }
-    for (const gatewayPolicy of [
-      undefined,
-      { allow: [] },
-      { allow: ["sessions", "diffs"], actions: { sessions: ["patch"] } },
-    ]) {
-      assert.doesNotThrow(() =>
-        driver.validateHarnessAuth(
-          harness,
-          apiKeyAuth,
-          {
-            ...config,
-            tools: gatewayPolicy === undefined ? {} : { gatewayPolicy },
-          },
-          null,
-        ),
+    for (const gatewayPolicy of acceptedPolicies) {
+      const label = `${id} ${mode} ${JSON.stringify(gatewayPolicy)}`;
+      assert.doesNotThrow(
+        () => driver.validateHarnessAuth(harness, apiKeyAuth, withPolicy(gatewayPolicy), null),
+        label,
       );
+      assert.doesNotThrow(() => driver.validateConfiguration(withPolicy(gatewayPolicy)), label);
     }
   }
-  const embedded = { id: "openclaw", version: "1.0.0", mode: "embedded" };
-  assert.doesNotThrow(
+});
+
+test("an active embedded revision whose stored Gateway tool policy predates the rule keeps its maintenance passes", async () => {
+  // Finding 2694. The worker prepares and activates the active revision again on maintenance
+  // and recovery passes (every 30 s with repository credentials). A revision admitted before
+  // Agent admission checked the embedded policy must keep those passes until a redeploy, which
+  // admission refuses with the Configuration save text.
+  const { driver, revision, state, context } = workspaceSetupFixture(true);
+  revision.configuration = {
+    ...structuredClone(revision.configuration),
+    tools: { gatewayPolicy: { allow: ["sessions"] } },
+  };
+  state.ready = true;
+  await prepareUntilReady(driver, revision, context);
+  await driver.activateRevision(revision, context);
+  // The maintenance pass: preparation and activation of the same, now active, revision.
+  assert.equal((await driver.prepareRevision(revision, context)).ready, true);
+  await driver.activateRevision(revision, context);
+  const refused = {
+    name: "ConfigurationHarnessError",
+    message: /tools\.gatewayPolicy\.actions\.sessions must list the permitted actions/,
+  };
+  assert.throws(
     () =>
       driver.validateHarnessAuth(
-        embedded,
-        apiKeyAuth,
-        {
-          ...createHarnessConfiguration("openclaw", "gpt-4o-mini"),
-          tools: { gatewayPolicy: { allow: ["gateway"] } },
-        },
-        null,
+        revision.harness,
+        revision.harnessAuth,
+        revision.configuration,
+        revision.secretBindings,
       ),
-    "dedicated baseline does not alter embedded configuration",
+    refused,
+    "a new deployment",
   );
+  assert.throws(() => driver.validateConfiguration(revision.configuration), refused, "save");
 });

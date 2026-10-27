@@ -12,6 +12,7 @@ import {
   computeReleasePublicKey,
   signComputeExecutionRelease,
 } from "../egress-enrollment.ts";
+import { forwardMethod } from "../../../backends/token-service/forward-method.ts";
 import { ProtectedExecutionDriver } from "../protected-execution-driver.ts";
 import type { InstalledDriver } from "@openclaw-enterprise/occ";
 import { requireConfiguration, ConfigurationValidationError } from "@openclaw-enterprise/contracts";
@@ -205,7 +206,7 @@ import {
   requireWorkspaceNodePlugins,
   usesGatewayPasswordEnvironment,
 } from "./configuration-rules.ts";
-import { managedGatewayConfiguration } from "../gateway-tool-policy.ts";
+import { managedGatewayConfiguration, validateGatewayToolPolicy } from "../gateway-tool-policy.ts";
 import { nodeProgramArguments } from "../node-program.ts";
 import { codexGatewayModelConfiguration } from "../codex-model-configuration.ts";
 import { discoverHarnessModels } from "../model-discovery.ts";
@@ -3278,6 +3279,42 @@ function gatewayDocumentBeforeLanBind(
   return JSON.stringify(earlier);
 }
 
+/** Compute observes prepared-source readiness; it does not resolve warm credentials. */
+type PreparedTokenReadinessIssuer = Pick<
+  NonNullable<ReturnType<PreparedTokenService["issuer"]>>,
+  "sourceFromRoute" | "ready"
+>;
+type PreparedTokenReadinessService = {
+  issuer(
+    ...args: Parameters<PreparedTokenService["issuer"]>
+  ): PreparedTokenReadinessIssuer | undefined;
+};
+
+function preparedTokenReadiness(
+  service: PreparedTokenReadinessService | undefined,
+): PreparedTokenReadinessService | undefined {
+  if (!service) {
+    return undefined;
+  }
+  const select = forwardMethod(service, service.issuer);
+  return Object.freeze(
+    Object.assign(Object.create(null), {
+      issuer(provider) {
+        const owner = select(provider);
+        if (!owner) {
+          return undefined;
+        }
+        return Object.freeze(
+          Object.assign(Object.create(null), {
+            sourceFromRoute: forwardMethod(owner, owner.sourceFromRoute),
+            ready: forwardMethod(owner, owner.ready),
+          } satisfies PreparedTokenReadinessIssuer),
+        );
+      },
+    } satisfies PreparedTokenReadinessService),
+  );
+}
+
 export class KubernetesComputeDriver implements ComputeDriver {
   readonly discoverHarnessModels = discoverHarnessModels;
 
@@ -3497,7 +3534,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
   readonly id: string;
   readonly capability = "compute" as const;
   readonly implementation: string;
-  readonly supportsGatewayManagedMode = true as const;
+  // Declared only with a Gateway runtime, which managed revisions require (validateGatewayManagedMode).
+  readonly supportsGatewayManagedMode?: true;
   readonly supportsWorkspaceSetup = true as const;
   readonly requiresAgentRuntimeCredentials?: true;
   readonly agentProvisioning = Object.freeze({
@@ -3507,7 +3545,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
   private readonly sandboxDriver: SandboxDriver | undefined;
   private readonly preprovisionedNamespace: PreprovisionedKubernetesNamespace | undefined;
   private readonly preparedRepositoryIngress: boolean;
-  private readonly preparedTokens: PreparedTokenService | undefined;
+  private readonly preparedTokens: PreparedTokenReadinessService | undefined;
   private readonly credentialGatewayDriver: CredentialGatewayDriver | undefined;
   private readonly protectedExecution: ProtectedExecutionDriver | undefined;
 
@@ -4063,6 +4101,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     this.options = structuredClone(options);
     if (options.runtime !== undefined) {
       this.requiresAgentRuntimeCredentials = true;
+      this.supportsGatewayManagedMode = true;
     }
     this.protectedExecution =
       selection.protectedDriver && new ProtectedExecutionDriver(selection.protectedDriver);
@@ -4077,7 +4116,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     }
     this.sandboxDriver = this.protectedExecution?.sandbox ?? selection.sandboxDriver;
     this.preprovisionedNamespace = selection.preprovisionedNamespace;
-    this.preparedTokens = selection.preparedTokens;
+    this.preparedTokens = preparedTokenReadiness(selection.preparedTokens);
     if (this.preprovisionedNamespace && options.executionCluster) {
       throw new ConfigurationFailure(
         "A preprovisioned Namespace requires single-cluster Kubernetes execution.",
@@ -4440,6 +4479,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     credentialSourceType?: CredentialSourceType,
   ): void {
     this.validateAdmittedHarnessAuth(
+      "admission",
       harness,
       auth,
       configuration,
@@ -4491,8 +4531,10 @@ export class KubernetesComputeDriver implements ComputeDriver {
   }
 
   // validateHarnessAuth's rules for a document that may carry Compute's rendered settings:
-  // preparation passes the admitted revision's.
+  // preparation and activation pass the admitted revision's, also on maintenance and recovery
+  // passes of the active revision.
   private validateAdmittedHarnessAuth(
+    stage: "admission" | "preparation",
     harness: RevisionHarnessDescriptor,
     auth: HarnessAuthSnapshot,
     configuration: OpenClawConfigurationDocument,
@@ -4523,7 +4565,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     // Only dedicated execution serves main, so that rule stays here, at deployment.
     requireOpenClawRoster(configuration);
     // The same rules as Configuration save, with its messages, for a row stored before them.
-    this.validateConfigurationContent(configuration);
+    this.validateConfigurationContent(configuration, undefined, stage === "admission");
     if (native || codex) {
       requireDedicatedMainAgentDefault(
         configuration,
@@ -4681,8 +4723,8 @@ export class KubernetesComputeDriver implements ComputeDriver {
   /**
    * Configuration rules every Kubernetes topology applies, so Configuration save, provisioning
    * and Preset defaults refuse the content where it is written: supported channel providers,
-   * model credentials only through the Harness authentication binding, and model selections
-   * and provider apiKeys on the primary model's provider.
+   * model credentials only through the Harness authentication binding, the Gateway tool policy,
+   * and model selections and provider apiKeys on the primary model's provider.
    */
   validateConfiguration(
     configuration: Readonly<OpenClawConfigurationDocument>,
@@ -4696,9 +4738,17 @@ export class KubernetesComputeDriver implements ComputeDriver {
   private validateConfigurationContent(
     configuration: Readonly<OpenClawConfigurationDocument>,
     options?: ConfigurationValidationOptions,
+    toolPolicy = true,
   ): void {
     enabledChannelProviders(configuration, CHANNEL_PROVIDERS, callerSettingError);
     requireHarnessCredentialBinding(configuration, callerSettingError, options);
+    // Every OpenClaw topology applies the tool policy, embedded too (findings 2688, 2689).
+    // Preparation and activation skip it: an active revision saved before this rule keeps its
+    // maintenance and recovery passes until a redeploy, which admission checks (finding 2694).
+    // Dedicated preparation still checks its composed policy (managedGatewayConfiguration).
+    if (toolPolicy) {
+      validateGatewayToolPolicy(configuration, callerSettingError, options);
+    }
   }
 
   getGatewayEndpoint(revision: AgentRevision): string | undefined {
@@ -6255,6 +6305,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     const workspaceSetup = this.workspaceSetupForRevision(admittedRevision, context);
     await this.prepareRevisionStage("harness_auth", async () =>
       this.validateAdmittedHarnessAuth(
+        "preparation",
         revision.harness,
         revision.harnessAuth,
         admittedRevision.configuration,
@@ -7239,6 +7290,14 @@ export class KubernetesComputeDriver implements ComputeDriver {
                 return held;
               }
             }
+          } else if (providerEndpoint !== undefined && sandboxDriver.harnessStatus !== undefined) {
+            // A Codex Harness supervisor holding a failure found before Codex and its node
+            // start (state migration, workspace setup) never connects its node either:
+            // read the hold here too (finding 2686).
+            const held = heldProviderHarnessFailure(await observeProviderHarness());
+            if (held !== undefined) {
+              return held;
+            }
           }
           // The provider's Harness Pod and the Gateway are ready, so only the node's
           // connection is outstanding: say so, as the Compute-owned Harness path does
@@ -7520,6 +7579,7 @@ export class KubernetesComputeDriver implements ComputeDriver {
     this.verifyGatewayRoutingConfiguration(admittedRevision);
     const workspaceSetup = this.workspaceSetupForRevision(admittedRevision, context);
     this.validateAdmittedHarnessAuth(
+      "preparation",
       revision.harness,
       revision.harnessAuth,
       admittedRevision.configuration,

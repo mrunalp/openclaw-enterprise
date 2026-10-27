@@ -7,9 +7,11 @@ ARG NODE_RUNTIME_BASE_IMAGE=docker.io/library/node:24.22.1-bookworm-slim@sha256:
 # Refresh installed Debian packages; the pinned upstream images can predate
 # security updates. Keep the full toolchain out of the final runtime.
 FROM ${NODE_BASE_IMAGE} AS node-build-base
+RUN node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); if (major !== 24 || minor < 22 || (minor === 22 && patch < 1)) throw new Error(`Select a Node.js 24.22.1+ base image in the 24 series; found ${process.version}.`);'
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
 FROM ${NODE_RUNTIME_BASE_IMAGE} AS node-runtime-base
+RUN node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); if (major !== 24 || minor < 22 || (minor === 22 && patch < 1)) throw new Error(`Select a Node.js 24.22.1+ base image in the 24 series; found ${process.version}.`);'
 RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/*
 
 # The credential builds need only Node and pnpm. The slim runtime base is
@@ -35,7 +37,7 @@ RUN --mount=type=secret,id=npmrc,target=/root/.npmrc,required=false \
 # the controller's compiler options and turns off only project build outputs
 # (declarations, build info) and the type check; Static Checks and the service
 # build below check types. The emitted files match the full build's
-# (tests/integration/repository-credentials-package.test.mjs).
+# (tests/integration/repository-credentials-package.test.ts).
 FROM repository-credentials-deps AS repository-client-build
 COPY tsconfig.base.json ./
 COPY apps/controller/tsconfig.json apps/controller/tsconfig.json
@@ -109,15 +111,15 @@ RUN --mount=type=secret,id=build-ca,required=false \
 # which writes provenance; runtime-assets.test.mjs compares the two.
 # TODO: Remove this bridge patch when OpenClaw supports networkProxy.readOnlyPaths.
 COPY deploy/runtime/openclaw-codex-read-only-paths.patch /tmp/openclaw-codex-read-only-paths.patch
-RUN echo '2e529593cb72c69be86cf7bb927aa555de50bc7ef923e80b37ba67df9bc1a624  /tmp/openclaw-codex-read-only-paths.patch' | sha256sum --check --strict \
+RUN echo 'f8d1e51706f59964839d231818909ffb2ee5f6b951385a353a1a4fd07c45e2cc  /tmp/openclaw-codex-read-only-paths.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-codex-read-only-paths.patch
 # TODO: Remove this bridge patch when OpenClaw selects the native full-access profile.
 COPY deploy/runtime/openclaw-codex-full-access-profile.patch /tmp/openclaw-codex-full-access-profile.patch
-RUN echo 'ce301e59ba9266f7897c472cd54d51f487a4f9ed75034824f48c6839b35e922f  /tmp/openclaw-codex-full-access-profile.patch' | sha256sum --check --strict \
+RUN echo '7c95a5a3727bd4c73bb9ccf3022eb4b33d182cd7f6b761dc93ecfe08ef08e27a  /tmp/openclaw-codex-full-access-profile.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-codex-full-access-profile.patch
 # TODO: Remove this dependency pin when the selected OpenClaw source supports plugin defaults.
 COPY deploy/runtime/stock-codex-0.163.0-alpha.2-dependency-pin.patch /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch
-RUN echo '686dcb3fcdd384150845f7af5b5f3bf46b2dc6ee24ab8f5b629b10566e18afd4  /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch' | sha256sum --check --strict \
+RUN echo 'd7eea3944eaaf4469ede0261d4f706148cd672f29f1efedd59e325c46c90d119  /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch' | sha256sum --check --strict \
     && git apply --unidiff-zero /tmp/stock-codex-0.163.0-alpha.2-dependency-pin.patch
 COPY scripts/build-runtime-assets.mjs /tmp/build-runtime-assets.mjs
 RUN node /tmp/build-runtime-assets.mjs inputs /source /inputs
@@ -171,16 +173,16 @@ COPY --from=openclaw-source /source/ ./
 # Exercise the original caller through the public RPC before and after the
 # placement acknowledgment, including revocation, against this exact source.
 COPY deploy/runtime/openclaw-required-worker-authority-regression.patch /tmp/openclaw-required-worker-authority-regression.patch
-RUN echo 'ac7d081a26c23b7e02d7b2c51abb77a7d5d36135eb49a077b5c65bdcae68dd40  /tmp/openclaw-required-worker-authority-regression.patch' | sha256sum --check --strict \
+RUN echo '4d7b31957dab6e8427eeb9a8cce0a8013f0f96b999e2692fdd6903595c3c4804  /tmp/openclaw-required-worker-authority-regression.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-required-worker-authority-regression.patch
 # Remove this bridge when the pinned Control UI offers a browser navigation after access refusal.
 COPY deploy/runtime/openclaw-control-ui-browser-reconnect.patch /tmp/openclaw-control-ui-browser-reconnect.patch
-RUN echo 'bbd27ee1384129ca00d113b6f2a30477502cce38588054d22d50e53f668eee59  /tmp/openclaw-control-ui-browser-reconnect.patch' | sha256sum --check --strict \
+RUN echo '48dbcb32c453861b8d8facf9d1fd62003a994c234289270727eb41763b8b8d9c  /tmp/openclaw-control-ui-browser-reconnect.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-control-ui-browser-reconnect.patch
 # The runtime needs supervised recovery across private PID namespaces. Native
 # lock reinspection and custody still guard every destructive operation.
 COPY deploy/runtime/openclaw-terminated-gateway-namespace.patch /tmp/openclaw-terminated-gateway-namespace.patch
-RUN echo 'af52f6ec87e80f35f141c82cfd0e34a73b7ba90bf593fb4889a48b22dea76a11  /tmp/openclaw-terminated-gateway-namespace.patch' | sha256sum --check --strict \
+RUN echo '570fb99e849442793eeb0e59417b4b4b2b282e7d236392a022258753b353263b  /tmp/openclaw-terminated-gateway-namespace.patch' | sha256sum --check --strict \
     && git apply /tmp/openclaw-terminated-gateway-namespace.patch
 
 # Run the bridge tests alongside the build using the same patched source.
@@ -297,7 +299,7 @@ ENV PATH=/app/node_modules/.bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bi
 
 WORKDIR /app
 
-RUN node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); if (major !== 24 || minor < 22 || (minor === 22 && patch < 1)) throw new Error(`OpenClaw Enterprise runtime images require Node.js 24.22.1+; found ${process.version}.`);'
+RUN node -e 'const [major, minor, patch] = process.versions.node.split(".").map(Number); if (major !== 24 || minor < 22 || (minor === 22 && patch < 1)) throw new Error(`Select a Node.js 24.22.1+ base image in the 24 series; found ${process.version}.`);'
 
 RUN apt-get update && apt-get install -y --no-install-recommends tini git ca-certificates curl openssh-client libstdc++6 libgomp1 python3 procps && rm -rf /var/lib/apt/lists/*
 # Version checks use throwaway state directories: gh writes a random device ID
@@ -310,15 +312,16 @@ RUN --mount=type=secret,id=build-ca,required=false \
     architecture="${TARGETARCH:-amd64}"; \
     case "$architecture" in amd64|arm64) ;; *) exit 1 ;; esac; \
     cd /tmp; \
-    curl --fail --location --no-progress-meter --retry 6 -O "https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_linux_${architecture}.tar.gz"; \
-    curl --fail --location --no-progress-meter --retry 6 -O "https://github.com/cli/cli/releases/download/v2.100.0/gh_2.100.0_checksums.txt"; \
-    grep " gh_2.100.0_linux_${architecture}.tar.gz$" gh_2.100.0_checksums.txt | sha256sum --check --strict; \
-    tar -xzf "gh_2.100.0_linux_${architecture}.tar.gz"; \
-    install -m 0755 "gh_2.100.0_linux_${architecture}/bin/gh" /usr/local/bin/gh; \
-    rm -rf /tmp/gh_2.100.0*; \
+    curl --fail --location --no-progress-meter --retry 6 -O "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_linux_${architecture}.tar.gz"; \
+    curl --fail --location --no-progress-meter --retry 6 -O "https://github.com/cli/cli/releases/download/v2.103.2/gh_2.103.2_checksums.txt"; \
+    echo '414d6009dc7f9f936d70831af818d1a32aa0ff07a77646861efd207356a36b2d  gh_2.103.2_checksums.txt' | sha256sum --check --strict; \
+    grep " gh_2.103.2_linux_${architecture}.tar.gz$" gh_2.103.2_checksums.txt | sha256sum --check --strict; \
+    tar -xzf "gh_2.103.2_linux_${architecture}.tar.gz"; \
+    install -m 0755 "gh_2.103.2_linux_${architecture}/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh_2.103.2*; \
     /usr/bin/git --version; \
     gh_state="$(mktemp -d)"; \
-    XDG_STATE_HOME="$gh_state" /usr/local/bin/gh --version | grep '^gh version 2.100.0 '; \
+    XDG_STATE_HOME="$gh_state" /usr/local/bin/gh --version | grep '^gh version 2.103.2 '; \
     rm -rf "$gh_state"
 
 COPY --from=openclaw-runtime-assets /out/ /opt/oce/runtime/
