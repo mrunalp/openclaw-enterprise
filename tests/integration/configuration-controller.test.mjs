@@ -35,6 +35,7 @@ import {
   codexApiKeyRefusal,
 } from "../helpers/refusal-text.mjs";
 import { temporaryDirectory } from "../helpers/temporary-directory.mjs";
+import { servedAs } from "../helpers/agent-identity.mjs";
 
 function createConfigurationBackend() {
   // This deliberately simple substrate exercises the real Fastify, IAM, OCC, and audit paths.
@@ -2603,8 +2604,8 @@ for (const runtimeLogging of [undefined, "driver"]) {
     assert.deepEqual(
       deployed.body.data.configuration,
       runtimeLogging === "driver"
-        ? initialValues
-        : admitLoggingConfiguration(initialValues, "info"),
+        ? servedAs(initialValues, "Configuration consumer")
+        : admitLoggingConfiguration(servedAs(initialValues, "Configuration consumer"), "info"),
     );
 
     const source = await request(context.app, "GET", `${collection}/${configurationId}`);

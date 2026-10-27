@@ -246,7 +246,7 @@ import {
   isNonEmptyString,
 } from "@openclaw-enterprise/utils";
 import { requireFallbackProviders, resolveConfiguredHarnessId } from "./configured-harness.ts";
-import { requireDeployableRoster } from "./openclaw-roster.ts";
+import { requireDeployableRoster, withAgentIdentityName } from "./openclaw-roster.ts";
 import {
   capability,
   driverHasCapabilityContract,
@@ -10264,7 +10264,9 @@ export class OpenClawController {
         configurationId: configuration.id,
         configurationKind: configuration.kind,
         configurationGeneration: configuration.generation,
-        configuration: admittedConfiguration,
+        // Admission checked the Configuration as written; a refusal names only its own settings.
+        // The name then becomes the served Agent's OpenClaw display name.
+        configuration: frozenValues(withAgentIdentityName(admittedConfiguration, lockedAgent.name)),
         gatewayManagedMode: lockedAgent.gatewayManagedMode,
         harness: revisionHarness,
         compute: { id: compute.id, implementation: compute.implementation },

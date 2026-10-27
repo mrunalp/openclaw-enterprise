@@ -955,6 +955,7 @@ test(
     const nativeResponses = [];
     const nativeWebSockets = [];
     const nativeSocketFrames = [];
+    const bootstrapResponses = [];
     browserContext.on("response", (response) => {
       const url = new URL(response.url());
       if (url.origin === status.origin) {
@@ -963,6 +964,9 @@ test(
           status: response.status(),
           resourceType: response.request().resourceType(),
         });
+        if (url.pathname.endsWith("/control-ui-config.json")) {
+          bootstrapResponses.push(response);
+        }
       }
     });
     browserContext.on("page", (observedPage) =>
@@ -988,6 +992,13 @@ test(
     const deepLinkResponse = await nativePage.goto(deepLink.href);
     assert.ok(deepLinkResponse?.status() < 400, "stock UI deep link must be served");
     await waitForStockUi(nativePage);
+    // The stock UI reads its assistant name from the Gateway's bootstrap document. The OCC
+    // Agent name must replace the stock "Assistant", which the Gateway cuts to 50 characters.
+    assert.ok(bootstrapResponses.length > 0, "the stock UI must load its bootstrap document");
+    for (const response of bootstrapResponses) {
+      assert.equal(response.status(), 200);
+      assert.equal((await response.json()).assistantName, topology.agent.name.slice(0, 50));
+    }
     await nativePage.locator(".page-title").getByText("Advanced", { exact: true }).waitFor();
     await nativePage.getByRole("button", { name: "Raw", exact: true }).waitFor();
     await nativePage.screenshot({
